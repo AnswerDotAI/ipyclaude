@@ -462,11 +462,12 @@ class IPyAIExtension:
             ncode,nprompt = self.save_startup()
             return print(f"Saved {ncode} code cells and {nprompt} prompts to {STARTUP_PATH}.")
         cmd,_,arg = line.partition(" ")
-        if arg:
+        if arg and cmd in _status_attrs:
             clean = arg.strip()
-            vals = dict(model=clean, think=_validate_level("think", arg, self.think), search=_validate_level("search", arg, self.search),
-                code_theme=clean or DEFAULT_CODE_THEME, log_exact=_validate_bool("log_exact", arg, self.log_exact))
-            if cmd in vals: return self._set(cmd, vals[cmd])
+            if   cmd in ('think','search'): clean = _validate_level(cmd, arg, getattr(self, cmd))
+            elif cmd == 'code_theme':       clean = clean or DEFAULT_CODE_THEME
+            elif cmd == 'log_exact':        clean = _validate_bool(cmd, arg, self.log_exact)
+            return self._set(cmd, clean)
         return self.run_prompt(line)
 
     async def _run_prompt(self, prompt: str):
