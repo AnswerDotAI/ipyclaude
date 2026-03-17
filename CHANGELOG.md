@@ -2,6 +2,13 @@
 
 <!-- do not remove -->
 
+## 0.0.4
+
+### New Features
+
+- Support async tools ([#4](https://github.com/AnswerDotAI/ipyai/issues/4))
+
+
 ## 0.0.3
 
 ### New Features
