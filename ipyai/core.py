@@ -1,4 +1,5 @@
 import html,inspect,json,os,re,sqlite3,sys
+from contextlib import contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
 from typing import Callable
@@ -27,6 +28,8 @@ The user interacts with you through `ipyai`, an IPython extension that turns inp
 You may receive:
 - a `<context>` XML block containing recent IPython code and optional outputs
 - a `<user-request>` XML block containing the user's actual request
+
+Earlier user turns in the chat history may also contain their own `<context>` blocks. When answering questions about what you have seen in the IPython session, consider the full chat history, not only the latest `<context>` block.
 
 You can respond in Markdown. Your final visible output in terminal IPython will be rendered with Rich, so normal Markdown formatting, fenced code blocks, lists, and tables are appropriate when useful.
 
@@ -185,6 +188,18 @@ def _validate_bool(name: str, value, default: bool) -> bool:
         if value in {"1", "true", "yes", "on"}: return True
         if value in {"0", "false", "no", "off"}: return False
     raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
+@contextmanager
+def _suppress_output_history(shell):
+    pub = getattr(shell, "display_pub", None)
+    if pub is None or not hasattr(pub, "_is_publishing"):
+        yield
+        return
+    old = pub._is_publishing
+    pub._is_publishing = True
+    try: yield
+    finally: pub._is_publishing = old
 
 
 def _default_config():
@@ -464,9 +479,10 @@ class IPyAIExtension:
         cmd,_,arg = line.partition(" ")
         if arg:
             clean = arg.strip()
-            vals = dict(model=clean, think=_validate_level("think", arg, self.think), search=_validate_level("search", arg, self.search),
-                code_theme=clean or DEFAULT_CODE_THEME, log_exact=_validate_bool("log_exact", arg, self.log_exact))
-            if cmd in vals: return self._set(cmd, vals[cmd])
+            vals = dict(model=lambda: clean, think=lambda: _validate_level("think", clean, self.think),
+                search=lambda: _validate_level("search", clean, self.search), code_theme=lambda: clean or DEFAULT_CODE_THEME,
+                log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
+            if cmd in vals: return self._set(cmd, vals[cmd]())
         return self.run_prompt(line)
 
     async def _run_prompt(self, prompt: str):
@@ -479,7 +495,7 @@ class IPyAIExtension:
         self.shell.user_ns[LAST_PROMPT] = prompt
         chat = AsyncChat(model=self.model, sp=self.system_prompt, ns=self.shell.user_ns, hist=hist, tools=tools or None)
         stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
-        text = await astream_to_stdout(stream, code_theme=self.code_theme)
+        with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, code_theme=self.code_theme)
         self.shell.user_ns[LAST_RESPONSE] = text
         self.log_exact_exchange(full_prompt, text)
         self.save_prompt(prompt, text, history_line)
