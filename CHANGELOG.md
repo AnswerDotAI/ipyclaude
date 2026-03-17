@@ -2,6 +2,13 @@
 
 <!-- do not remove -->
 
+## 0.0.5
+
+### New Features
+
+- Add output-history suppression during AI streaming ([#8](https://github.com/AnswerDotAI/ipyai/issues/8))
+
+
 ## 0.0.4
 
 ### New Features
