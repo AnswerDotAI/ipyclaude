@@ -81,13 +81,15 @@ with risks and rollback steps
 %ipyai think m
 %ipyai search h
 %ipyai code_theme monokai
+%ipyai save
 %ipyai reset
 ```
 
 Behavior:
 
-- `%ipyai` prints the active model, think level, search level, code theme, config path, and system prompt path
+- `%ipyai` prints the active model, think level, search level, code theme, logging flag, config path, system prompt path, startup path, and exact-log path
 - `%ipyai model ...`, `%ipyai think ...`, `%ipyai search ...`, `%ipyai code_theme ...` change the current session only
+- `%ipyai save` writes the current session's code and AI prompts to `startup.json`
 - `%ipyai reset` deletes AI prompt history for the current IPython session and resets the code-context baseline
 
 ## Tools
@@ -108,12 +110,29 @@ Responses are streamed directly to the terminal during generation. After streami
 - the visible terminal output is re-rendered with `rich.Markdown`
 - tool call detail blocks are compacted to a short single-line form such as `🔧 f(x=1) => 2`
 
+## Startup Replay
+
+On first load, `ipyai` also creates `~/.config/ipyai/startup.json`.
+
+`%ipyai save` snapshots the current IPython session into that file:
+
+- normal code cells are saved as code events
+- AI prompts are saved as prompt/response events
+
+When `ipyai` loads into a fresh terminal IPython session:
+
+- saved code events are replayed with `run_cell(..., store_history=True)`
+- saved prompt/response pairs are inserted into `ai_prompts` for the new session
+
+This is intended for priming new sessions with imports, helper definitions, tools, and prior AI context without re-running the prompts themselves.
+
 ## Configuration
 
-On first load, `ipyai` creates two files under the XDG config directory:
+On first load, `ipyai` creates these files under the XDG config directory:
 
 - `~/.config/ipyai/config.json`
 - `~/.config/ipyai/sysp.txt`
+- `~/.config/ipyai/startup.json`
 
 `config.json` currently supports:
 
@@ -122,7 +141,8 @@ On first load, `ipyai` creates two files under the XDG config directory:
   "model": "claude-sonnet-4-6",
   "think": "l",
   "search": "l",
-  "code_theme": "monokai"
+  "code_theme": "monokai",
+  "log_exact": false
 }
 ```
 
@@ -131,6 +151,7 @@ Notes:
 - `model` defaults from `IPYAI_MODEL` if that environment variable is set when the config file is first created
 - `think` and `search` must be one of `l`, `m`, or `h`
 - `code_theme` is passed to Rich for fenced and inline code styling
+- `log_exact`, when true, appends the exact full prompt sent to the model and the exact raw response returned by the model to `~/.config/ipyai/exact-log.jsonl`
 
 `sysp.txt` is used as the system prompt passed to `lisette.Chat`.
 

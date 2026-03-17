@@ -30,11 +30,13 @@ Implemented:
 - backtick-to-magic rewriting using IPython cleanup transforms
 - multiline prompts
 - session-scoped prompt persistence in SQLite
+- startup snapshot save/replay through `startup.json`
 - dynamic code/output context reconstruction
 - ampersand-backtick tool exposure from `user_ns`
 - streaming responses
 - final Rich markdown rendering
-- XDG-backed config and system prompt files
+- XDG-backed config, startup, and system prompt files
+- optional exact raw prompt/response logging
 
 ## File Map
 
@@ -51,7 +53,26 @@ Each AI prompt is saved in an `ai_prompts` table inside IPython's history SQLite
 - `response`
 - `history_line`
 
-Stored rows contain only the user prompt and full AI response. The code context is generated dynamically each time a prompt runs.
+Stored rows contain only the user prompt, full AI response, and the line where the code context for that prompt stops.
+
+Example:
+
+```python
+In [1]: import math
+In [2]: `first prompt
+In [3]: x = 1
+In [4]: `second prompt
+```
+
+The stored rows are roughly:
+
+- first prompt: `history_line=1`
+- second prompt: `history_line=3`
+
+So for the second prompt, `ipyai` knows:
+
+- the code context before it should include `x = 1`, but not `import math`
+- the prompt itself happened immediately after line 3
 
 For each new prompt, `ipyai` reconstructs chat history as alternating user / assistant entries:
 
@@ -69,10 +90,10 @@ The `<context>` block contains all non-`ipyai` code run since the previous AI pr
 The extension lifecycle is:
 
 1. `%load_ext ipyai` calls `load_ipython_extension`, which delegates to `create_extension`.
-2. `IPyAIExtension.load()` registers `%ipyai` / `%%ipyai` and inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`.
+2. `IPyAIExtension.load()` registers `%ipyai` / `%%ipyai`, inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`, and applies `startup.json` if the session is still fresh.
 3. Any cell whose first character is `` ` `` is rewritten by `transform_backticks()` into `get_ipython().run_cell_magic('ipyai', '', prompt)`.
 4. `AIMagics.ipyai()` routes line input to `handle_line()` and cell input to `run_prompt()`.
-5. `run_prompt()` reconstructs conversation history, resolves tools, calls `lisette.Chat`, streams the response, stores the full response, and returns `None`.
+5. `run_prompt()` reconstructs conversation history, resolves tools, calls `lisette.Chat`, streams the response, optionally writes an exact raw prompt/response log entry, stores the full response, and returns `None`.
 
 ## Why Cleanup Transforms
 
@@ -119,9 +140,26 @@ CREATE TABLE IF NOT EXISTS ai_prompts (
 Notes:
 
 - rows are scoped by IPython `session_number`
-- `history_line` records the execution line associated with that prompt
 - `history_line` is used to decide which code cells belong in the next prompt's generated `<context>` block
+- if `ai_prompts` does not match the expected schema, `ipyai` drops and recreates it instead of migrating it
 - `%ipyai reset` deletes only current-session rows and sets a reset baseline in `user_ns`
+
+## Startup Snapshot
+
+`startup.json` is stored next to the other XDG files.
+
+`%ipyai save` writes a merged event stream for the current session:
+
+- code events store the source to replay
+- prompt events store the prompt, saved response, and prompt position
+
+On a fresh load:
+
+- code events are replayed with `run_cell(..., store_history=True)`
+- prompt events are inserted directly into `ai_prompts`
+- `execution_count` is advanced for restored prompt events so later saves preserve ordering
+
+This lets a new terminal session pick up imports, helper functions, tool definitions, and prior AI chat history without re-running the prompts themselves.
 
 ## Code Context Reconstruction
 
@@ -176,14 +214,18 @@ That rewrite affects only the visible terminal output. SQLite keeps the original
 
 XDG paths are used via `fastcore.xdg.xdg_config_home()`:
 
-- `config.json`: model, think, search, and Rich code theme
+- `config.json`: model, think, search, Rich code theme, and the exact-log flag
 - `sysp.txt`: system prompt passed as `sp=` to `lisette.Chat`
+- `startup.json`: saved startup snapshot for fresh sessions
+- `exact-log.jsonl`: optional raw prompt/response log output
 
 Creation behavior:
 
-- both files are auto-created if missing
+- all three files are auto-created if missing
 - the initial `model` defaults from `IPYAI_MODEL` if present
 - runtime `%ipyai model ...` and similar commands change only the live extension object, not the config file
+
+When `log_exact` is enabled, the log file contains the exact fully-expanded prompt passed to the model and the exact raw response returned from the stream.
 
 ## Tests
 
@@ -197,6 +239,8 @@ Coverage currently focuses on:
 - context generation
 - tool resolution
 - config and system prompt file creation
+- startup save/replay
+- raw exact logging
 - final Rich render behavior
 - terminal clear logic around rewritten output
 
@@ -222,7 +266,7 @@ If you want to change terminal rendering:
 
 If you want to change persistence:
 
-- edit `ensure_prompt_table()`, `prompt_records()`, `save_prompt()`, and `reset_session_history()`
+- edit `ensure_prompt_table()`, `prompt_records()`, `save_prompt()`, `save_startup()`, `apply_startup()`, and `reset_session_history()`
 
 ## Working Assumptions
 

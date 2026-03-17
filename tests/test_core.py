@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import io,json,sqlite3
+from types import SimpleNamespace
 
 import pytest
 from IPython.core.inputtransformer2 import TransformerManager
 
 from ipyai.core import AI_EXTENSION_NS, AI_LAST_PROMPT, AI_LAST_RESPONSE, AI_RESET_LINE_NS
-from ipyai.core import DEFAULT_CODE_THEME, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK
+from ipyai.core import DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK
 from ipyai.core import IPyAIExtension, _clear_terminal_block, _display_line_count, compact_tool_display
 from ipyai.core import prompt_from_lines, stream_to_stdout, transform_backticks
 
@@ -76,8 +77,16 @@ class DummyShell:
         self.magics = []
         self.history_manager = DummyHistory()
         self.execution_count = 2
+        self.ran_cells = []
 
     def register_magics(self, magics): self.magics.append(magics)
+
+    def run_cell(self, source, store_history=False):
+        self.ran_cells.append((source, store_history))
+        if store_history:
+            self.history_manager.add(self.execution_count, source)
+            self.execution_count += 1
+        return SimpleNamespace(success=True)
 
 
 @pytest.fixture(autouse=True)
@@ -190,23 +199,45 @@ def test_extension_load_is_idempotent_and_tracks_last_response():
     assert shell.user_ns[AI_LAST_PROMPT] == "tell me something"
     assert shell.user_ns[AI_LAST_RESPONSE] == "first second"
     assert ext.prompt_rows() == [("tell me something", "first second")]
+    assert ext.prompt_records()[0][3] == 1
+
+
+def test_unexpected_prompt_table_schema_is_recreated():
+    shell = DummyShell()
+    with shell.history_manager.db:
+        shell.history_manager.db.execute("CREATE TABLE ai_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER NOT NULL, "
+                                         "prompt TEXT NOT NULL, response TEXT NOT NULL, history_line INTEGER NOT NULL DEFAULT 0, "
+                                         "prompt_line INTEGER NOT NULL DEFAULT 0)")
+        shell.history_manager.db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line, prompt_line) VALUES "
+                                         "(1, 'p', 'r', 1, 2)")
+
+    ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter)
+
+    assert ext.prompt_records() == []
+    cols = [o[1] for o in shell.history_manager.db.execute("PRAGMA table_info(ai_prompts)")]
+    assert cols == ["id", "session", "prompt", "response", "history_line"]
 
 
 def test_config_file_is_created_and_loaded(tmp_path):
     cfg_path = tmp_path/"ipyai"/"config.json"
     sysp_path = tmp_path/"ipyai"/"sysp.txt"
+    startup_path = tmp_path/"ipyai"/"startup.json"
     shell = DummyShell()
 
-    ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter, config_path=cfg_path, sysp_path=sysp_path)
+    ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter, config_path=cfg_path, sysp_path=sysp_path,
+                         startup_path=startup_path)
 
     assert cfg_path.exists()
     assert sysp_path.exists()
+    assert startup_path.exists()
     data = json.loads(cfg_path.read_text())
     assert data["model"] == ext.model
     assert data["think"] == DEFAULT_THINK
     assert data["search"] == DEFAULT_SEARCH
     assert data["code_theme"] == DEFAULT_CODE_THEME
+    assert data["log_exact"] == DEFAULT_LOG_EXACT
     assert sysp_path.read_text() == DEFAULT_SYSTEM_PROMPT
+    assert json.loads(startup_path.read_text()) == dict(version=1, events=[])
     assert ext.system_prompt == DEFAULT_SYSTEM_PROMPT
 
 
@@ -225,7 +256,7 @@ def test_existing_sysp_file_is_loaded(tmp_path):
 def test_config_values_drive_model_think_and_search(tmp_path):
     cfg_path = tmp_path/"ipyai"/"config.json"
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text(json.dumps(dict(model="cfg-model", think="m", search="h")))
+    cfg_path.write_text(json.dumps(dict(model="cfg-model", think="m", search="h", log_exact=True)))
     DummyChat.instances = []
     shell = DummyShell()
     ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter, config_path=cfg_path).load()
@@ -235,6 +266,7 @@ def test_config_values_drive_model_think_and_search(tmp_path):
     assert ext.model == "cfg-model"
     assert ext.think == "m"
     assert ext.search == "h"
+    assert ext.log_exact is True
     assert DummyChat.instances[-1].calls == [(
         "<user-request>tell me something</user-request>",
         True,
@@ -244,11 +276,13 @@ def test_config_values_drive_model_think_and_search(tmp_path):
 
 def test_handle_line_can_report_and_set_model(capsys):
     shell = DummyShell()
-    ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter, model="old-model", think="m", search="h", code_theme="github-dark")
+    ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter, model="old-model", think="m", search="h",
+                         code_theme="github-dark", log_exact=True)
 
     ext.handle_line("")
     assert capsys.readouterr().out == (
-        f"Model: old-model\nThink: m\nSearch: h\nCode theme: github-dark\nConfig: {ext.config_path}\nSystem prompt: {ext.sysp_path}\n"
+        f"Model: old-model\nThink: m\nSearch: h\nCode theme: github-dark\nLog exact: True\nConfig: {ext.config_path}\n"
+        f"System prompt: {ext.sysp_path}\nStartup: {ext.startup_path}\nExact log: {ext.log_path}\n"
     )
 
     ext.handle_line("model new-model")
@@ -336,6 +370,60 @@ def test_history_context_uses_lines_since_last_prompt_only():
     prompt = ext.format_prompt("second prompt", ext.last_prompt_line()+1, 4)
     assert "before = 1" not in prompt
     assert "after = 2" in prompt
+
+
+def test_startup_replays_code_and_restores_prompts(tmp_path):
+    startup_path = tmp_path/"ipyai"/"startup.json"
+    startup_path.parent.mkdir(parents=True, exist_ok=True)
+    events = [dict(kind="code", line=1, source="import math"), dict(kind="prompt", line=2, prompt="hi", response="hello"),
+              dict(kind="code", line=3, source="x = 1")]
+    data = dict(version=1, events=events)
+    startup_path.write_text(json.dumps(data))
+    shell = DummyShell()
+    shell.execution_count = 1
+
+    ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter, startup_path=startup_path).load()
+
+    assert shell.ran_cells == [("import math", True), ("x = 1", True)]
+    assert ext.prompt_rows() == [("hi", "hello")]
+    assert ext.prompt_records()[0][3] == 1
+    assert shell.execution_count == 4
+
+
+def test_save_writes_startup_snapshot(tmp_path, capsys):
+    startup_path = tmp_path/"ipyai"/"startup.json"
+    shell = DummyShell()
+    shell.history_manager.add(1, "import math")
+    shell.history_manager.add(2, "`first prompt")
+    shell.history_manager.add(3, "x = 1")
+    shell.execution_count = 4
+    ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter, startup_path=startup_path).load()
+    ext.save_prompt("first prompt", "first response", 1)
+
+    ext.handle_line("save")
+
+    assert capsys.readouterr().out == f"Saved 2 code cells and 1 prompts to {startup_path}.\n"
+    assert json.loads(startup_path.read_text()) == dict(version=1, events=[
+        dict(kind="code", line=1, source="import math"),
+        dict(kind="prompt", line=2, history_line=1, prompt="first prompt", response="first response"),
+        dict(kind="code", line=3, source="x = 1"),
+    ])
+
+
+def test_log_exact_writes_full_prompt_and_response(tmp_path):
+    log_path = tmp_path/"ipyai"/"exact-log.jsonl"
+    DummyChat.instances = []
+    shell = DummyShell()
+    shell.history_manager.add(1, "a = 1")
+    shell.execution_count = 3
+    ext = IPyAIExtension(shell=shell, chat_cls=DummyChat, formatter_cls=DummyFormatter, log_exact=True, log_path=log_path).load()
+
+    ext.run_prompt("tell me something")
+
+    rec = json.loads(log_path.read_text().strip())
+    assert rec["session"] == 1
+    assert rec["prompt"] == "<context><code>a = 1</code></context>\n<user-request>tell me something</user-request>"
+    assert rec["response"] == "first second"
 
 
 def test_cleanup_transform_prevents_help_syntax_interference():

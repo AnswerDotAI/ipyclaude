@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html,json,os,re,sqlite3,sys
 from dataclasses import dataclass,field
+from datetime import datetime,timezone
 from functools import partial
 from pathlib import Path
 from typing import Callable
@@ -19,6 +20,7 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_THINK = "l"
 DEFAULT_SEARCH = "l"
 DEFAULT_CODE_THEME = "monokai"
+DEFAULT_LOG_EXACT = False
 DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside IPython.
 
 The user interacts with you through `ipyai`, an IPython extension that turns input starting with a backtick into an AI prompt.
@@ -39,10 +41,12 @@ AI_LAST_RESPONSE = "_ai_last_response"
 AI_EXTENSION_NS = "_ipyai"
 AI_EXTENSION_ATTR = "_ipyai_extension"
 AI_RESET_LINE_NS = "_ipyai_reset_line"
+AI_STARTUP_APPLIED_NS = "_ipyai_startup_applied"
 AI_PROMPTS_TABLE = "ai_prompts"
+AI_PROMPTS_COLS = ["id", "session", "prompt", "response", "history_line"]
 
 __all__ = "AI_EXTENSION_ATTR AI_EXTENSION_NS AI_LAST_PROMPT AI_LAST_RESPONSE AI_MAGIC_NAME AI_PROMPTS_TABLE AI_RESET_LINE_NS DEFAULT_MODEL " \
-          "IPyAIExtension create_extension default_config_path default_sysp_path is_backtick_prompt load_ipython_extension prompt_from_lines " \
+          "IPyAIExtension create_extension default_config_path default_log_path default_startup_path default_sysp_path is_backtick_prompt load_ipython_extension prompt_from_lines " \
           "stream_to_stdout transform_backticks unload_ipython_extension".split()
 
 _prompt_template = """{context}<user-request>{prompt}</user-request>"""
@@ -170,14 +174,31 @@ def default_config_path() -> Path: return xdg_config_home()/"ipyai"/"config.json
 def default_sysp_path() -> Path: return xdg_config_home()/"ipyai"/"sysp.txt"
 
 
+def default_startup_path() -> Path: return xdg_config_home()/"ipyai"/"startup.json"
+
+
+def default_log_path() -> Path: return xdg_config_home()/"ipyai"/"exact-log.jsonl"
+
+
 def _validate_level(name: str, value: str, default: str) -> str:
     value = (value or default).strip().lower()
     if value not in {"l", "m", "h"}: raise ValueError(f"{name} must be one of h/m/l, got {value!r}")
     return value
 
 
+def _validate_bool(name: str, value, default: bool) -> bool:
+    if value is None: return default
+    if isinstance(value, bool): return value
+    if isinstance(value, str):
+        value = value.strip().lower()
+        if value in {"1", "true", "yes", "on"}: return True
+        if value in {"0", "false", "no", "off"}: return False
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
 def _default_config():
-    return dict(model=os.environ.get("IPYAI_MODEL", DEFAULT_MODEL), think=DEFAULT_THINK, search=DEFAULT_SEARCH, code_theme=DEFAULT_CODE_THEME)
+    return dict(model=os.environ.get("IPYAI_MODEL", DEFAULT_MODEL), think=DEFAULT_THINK, search=DEFAULT_SEARCH,
+                code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT)
 
 
 def load_config(path=None) -> dict:
@@ -193,6 +214,7 @@ def load_config(path=None) -> dict:
     cfg["think"] = _validate_level("think", cfg["think"], DEFAULT_THINK)
     cfg["search"] = _validate_level("search", cfg["search"], DEFAULT_SEARCH)
     cfg["code_theme"] = str(cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
+    cfg["log_exact"] = _validate_bool("log_exact", cfg["log_exact"], DEFAULT_LOG_EXACT)
     return cfg
 
 
@@ -201,6 +223,23 @@ def load_sysp(path=None) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists(): path.write_text(DEFAULT_SYSTEM_PROMPT)
     return path.read_text()
+
+
+def _default_startup(): return dict(version=1, events=[])
+
+
+def load_startup(path=None) -> dict:
+    path = Path(path or default_startup_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        data = json.loads(path.read_text())
+        if not isinstance(data, dict): raise ValueError(f"Invalid startup format in {path}")
+        events = data.get("events", [])
+        if not isinstance(events, list): raise ValueError(f"Invalid startup events in {path}")
+        return dict(version=int(data.get("version", 1)), events=events)
+    data = _default_startup()
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return data
 
 
 @magics_class
@@ -222,24 +261,31 @@ class IPyAIExtension:
     think: str|None=None
     search: str|None=None
     code_theme: str|None=None
+    log_exact: bool|None=None
     system_prompt: str|None=None
     chat_cls: Callable[..., Chat]=Chat
     formatter_cls: Callable[..., StreamFormatter]=StreamFormatter
     magic_name: str=AI_MAGIC_NAME
     config_path: Path|None=None
     sysp_path: Path|None=None
+    startup_path: Path|None=None
+    log_path: Path|None=None
     loaded: bool=False
     transformer: Callable = field(init=False)
 
     def __post_init__(self):
         self.config_path = Path(self.config_path or default_config_path())
         self.sysp_path = Path(self.sysp_path or default_sysp_path())
+        self.startup_path = Path(self.startup_path or default_startup_path())
+        self.log_path = Path(self.log_path or default_log_path())
         cfg = load_config(self.config_path)
         self.model = self.model or cfg["model"]
         self.think = _validate_level("think", self.think if self.think is not None else cfg["think"], DEFAULT_THINK)
         self.search = _validate_level("search", self.search if self.search is not None else cfg["search"], DEFAULT_SEARCH)
         self.code_theme = str(self.code_theme or cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
+        self.log_exact = _validate_bool("log_exact", self.log_exact if self.log_exact is not None else cfg["log_exact"], DEFAULT_LOG_EXACT)
         self.system_prompt = self.system_prompt if self.system_prompt is not None else load_sysp(self.sysp_path)
+        load_startup(self.startup_path)
         self.transformer = partial(transform_backticks, magic=self.magic_name)
 
     @property
@@ -250,6 +296,9 @@ class IPyAIExtension:
 
     @property
     def reset_line(self): return self.shell.user_ns.get(AI_RESET_LINE_NS, 0)
+
+    @property
+    def startup_applied(self): return bool(self.shell.user_ns.get(AI_STARTUP_APPLIED_NS, False))
 
     @property
     def db(self):
@@ -268,9 +317,18 @@ class IPyAIExtension:
                 history_line INTEGER NOT NULL DEFAULT 0
             )"""
             )
-            cols = {o[1] for o in self.db.execute(f"PRAGMA table_info({AI_PROMPTS_TABLE})")}
-            if "history_line" not in cols:
-                self.db.execute(f"ALTER TABLE {AI_PROMPTS_TABLE} ADD COLUMN history_line INTEGER NOT NULL DEFAULT 0")
+            cols = [o[1] for o in self.db.execute(f"PRAGMA table_info({AI_PROMPTS_TABLE})")]
+            if cols != AI_PROMPTS_COLS:
+                self.db.execute(f"DROP TABLE {AI_PROMPTS_TABLE}")
+                self.db.execute(
+                    f"""CREATE TABLE {AI_PROMPTS_TABLE} (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session INTEGER NOT NULL,
+                    prompt TEXT NOT NULL,
+                    response TEXT NOT NULL,
+                    history_line INTEGER NOT NULL DEFAULT 0
+                )"""
+                )
             self.db.execute(f"CREATE INDEX IF NOT EXISTS idx_{AI_PROMPTS_TABLE}_session_id ON {AI_PROMPTS_TABLE} (session, id)")
 
     def prompt_records(self, session: int | None=None) -> list:
@@ -290,10 +348,14 @@ class IPyAIExtension:
         c = getattr(self.shell, "execution_count", 1)
         return max(c-1, 0)
 
+    def current_input_line(self) -> int: return max(getattr(self.shell, "execution_count", 1), 1)
+
     def code_history(self, start: int, stop: int) -> list:
         hm = self.history_manager
         if hm is None or stop <= start: return []
         return list(hm.get_range(session=0, start=start, stop=stop, raw=True, output=True))
+
+    def full_history(self) -> list: return self.code_history(1, self.current_input_line()+1)
 
     def code_context(self, start: int, stop: int) -> str:
         entries = self.code_history(start, stop)
@@ -334,6 +396,50 @@ class IPyAIExtension:
         with self.db: self.db.execute(f"INSERT INTO {AI_PROMPTS_TABLE} (session, prompt, response, history_line) VALUES (?, ?, ?, ?)",
                                       (self.session_number, prompt, response, history_line))
 
+    def startup_events(self) -> list[dict]:
+        events = []
+        for _,line,pair in self.full_history():
+            source,_ = pair
+            if not source or _is_ipyai_input(source): continue
+            events.append(dict(kind="code", line=line, source=source))
+        for pid,prompt,response,history_line in self.prompt_records():
+            events.append(dict(kind="prompt", id=pid, line=history_line+1, history_line=history_line, prompt=prompt, response=response))
+        return sorted(events, key=lambda o: (o["line"], 0 if o["kind"] == "code" else 1))
+
+    def save_startup(self) -> tuple[int,int]:
+        data = dict(version=1, events=[{k:v for k,v in o.items() if k != "id"} for o in self.startup_events()])
+        self.startup_path.parent.mkdir(parents=True, exist_ok=True)
+        self.startup_path.write_text(json.dumps(data, indent=2) + "\n")
+        return sum(o["kind"] == "code" for o in data["events"]), sum(o["kind"] == "prompt" for o in data["events"])
+
+    def _advance_execution_count(self):
+        if hasattr(self.shell, "execution_count"): self.shell.execution_count += 1
+
+    def apply_startup(self) -> tuple[int,int]:
+        if self.startup_applied: return 0,0
+        self.shell.user_ns[AI_STARTUP_APPLIED_NS] = True
+        if self.current_prompt_line() > 0 or self.prompt_records(): return 0,0
+        events = load_startup(self.startup_path)["events"]
+        ncode = nprompt = 0
+        for o in sorted(events, key=lambda x: (x.get("line", 0), 0 if x.get("kind") == "code" else 1)):
+            if o.get("kind") == "code":
+                source = o.get("source", "")
+                if not source: continue
+                res = self.shell.run_cell(source, store_history=True)
+                ncode += 1
+                if getattr(res, "success", True) is False: break
+            elif o.get("kind") == "prompt":
+                self.save_prompt(o.get("prompt", ""), o.get("response", ""), self.current_prompt_line())
+                self._advance_execution_count()
+                nprompt += 1
+        return ncode,nprompt
+
+    def log_exact_exchange(self, prompt: str, response: str):
+        if not self.log_exact: return
+        rec = dict(ts=datetime.now(timezone.utc).isoformat(), session=self.session_number, prompt=prompt, response=response)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.log_path.open("a") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
     def reset_session_history(self) -> int:
         if self.db is None: return 0
         self.ensure_prompt_table()
@@ -354,6 +460,7 @@ class IPyAIExtension:
         self.shell.user_ns[AI_EXTENSION_NS] = self
         self.shell.user_ns.setdefault(AI_RESET_LINE_NS, 0)
         setattr(self.shell, AI_EXTENSION_ATTR, self)
+        self.apply_startup()
         self.loaded = True
         return self
 
@@ -373,8 +480,11 @@ class IPyAIExtension:
             print(f"Think: {self.think}")
             print(f"Search: {self.search}")
             print(f"Code theme: {self.code_theme}")
+            print(f"Log exact: {self.log_exact}")
             print(f"Config: {self.config_path}")
             print(f"System prompt: {self.sysp_path}")
+            print(f"Startup: {self.startup_path}")
+            print(f"Exact log: {self.log_path}")
             return None
         if line == "model":
             print(f"Model: {self.model}")
@@ -388,9 +498,16 @@ class IPyAIExtension:
         if line == "code_theme":
             print(f"Code theme: {self.code_theme}")
             return None
+        if line == "log_exact":
+            print(f"Log exact: {self.log_exact}")
+            return None
         if line == "reset":
             n = self.reset_session_history()
             print(f"Deleted {n} AI prompts from session {self.session_number}.")
+            return None
+        if line == "save":
+            ncode,nprompt = self.save_startup()
+            print(f"Saved {ncode} code cells and {nprompt} prompts to {self.startup_path}.")
             return None
         if line.startswith("model "):
             self.model = line.split(None, 1)[1].strip()
@@ -413,16 +530,17 @@ class IPyAIExtension:
     def run_prompt(self, prompt: str):
         prompt = (prompt or "").rstrip("\n")
         if not prompt.strip(): return None
-        prompt_line = self.current_prompt_line()
-        hist,recs = self.dialog_history(prompt_line)
+        history_line = self.current_prompt_line()
+        hist,recs = self.dialog_history(history_line)
         tools = self.resolve_tools(prompt, recs)
-        full_prompt = self.format_prompt(prompt, self.last_prompt_line()+1, prompt_line)
+        full_prompt = self.format_prompt(prompt, self.last_prompt_line()+1, history_line)
         self.shell.user_ns[AI_LAST_PROMPT] = prompt
         chat = self.chat_cls(model=self.model, sp=self.system_prompt, ns=self.shell.user_ns, hist=hist, tools=tools or None)
         text = stream_to_stdout(chat(full_prompt, stream=True, think=self.think, search=self.search),
                                 formatter_cls=self.formatter_cls, code_theme=self.code_theme)
         self.shell.user_ns[AI_LAST_RESPONSE] = text
-        self.save_prompt(prompt, text, prompt_line)
+        self.log_exact_exchange(full_prompt, text)
+        self.save_prompt(prompt, text, history_line)
         return None
 
 
