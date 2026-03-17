@@ -1,4 +1,5 @@
-__version__ = "0.0.4"
+__version__ = "0.0.5"
+
 
 
 from .core import DEFAULT_MODEL, IPyAIExtension, LAST_PROMPT, LAST_RESPONSE, create_extension, load_ipython_extension, unload_ipython_extension
