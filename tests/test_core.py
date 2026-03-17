@@ -8,7 +8,7 @@ from IPython.core.inputtransformer2 import TransformerManager
 
 from ipyai.core import AI_EXTENSION_NS, AI_LAST_PROMPT, AI_LAST_RESPONSE, AI_RESET_LINE_NS
 from ipyai.core import DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK
-from ipyai.core import IPyAIExtension, _clear_terminal_block, _display_line_count, compact_tool_display
+from ipyai.core import IPyAIExtension, compact_tool_display
 from ipyai.core import prompt_from_lines, stream_to_stdout, transform_backticks
 
 
@@ -35,6 +35,21 @@ class DummyConsole:
     def print(self, obj):
         self.printed.append(obj)
         self.kwargs["file"].write(f"RICH:{obj.text}")
+
+
+class DummyLive:
+    instances = []
+
+    def __init__(self, renderable, **kwargs):
+        self.kwargs = kwargs
+        self.renderables = [renderable]
+        type(self).instances.append(self)
+
+    def __enter__(self): return self
+
+    def __exit__(self, exc_type, exc, tb): self.kwargs["console"].print(self.renderables[-1])
+
+    def update(self, renderable, refresh=False): self.renderables.append(renderable)
 
 
 class DummyChat:
@@ -138,7 +153,7 @@ After""" % ("a" * 120)
     assert "🔧 f(x=1)" in res
 
 
-def test_stream_to_stdout_rewrites_tty_display_but_returns_full_text():
+def test_stream_to_stdout_uses_live_markdown_for_tty_and_returns_full_text():
     tool_block = """<details class='tool-usage-details'>
 <summary>f(x=1)</summary>
 
@@ -147,34 +162,37 @@ def test_stream_to_stdout_rewrites_tty_display_but_returns_full_text():
 ```
 
 </details>"""
-    out = TTYStringIO()
-    text = stream_to_stdout([tool_block], formatter_cls=DummyFormatter, out=out)
-    assert text == tool_block
-    assert "\x1b[" in out.getvalue()
-    assert "🔧 f(x=1) => 2" in out.getvalue()
-    assert "\n\n\n🔧" not in out.getvalue()
-
-
-def test_stream_to_stdout_renders_final_markdown_with_rich_options():
     DummyConsole.instances = []
+    DummyLive.instances = []
     out = TTYStringIO()
-    text = stream_to_stdout(["`x`"], formatter_cls=DummyFormatter, out=out, code_theme="github-dark", console_cls=DummyConsole, markdown_cls=DummyMarkdown)
+    text = stream_to_stdout([tool_block], formatter_cls=DummyFormatter, out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
+    assert text == tool_block
+    assert out.getvalue() == "RICH:🔧 f(x=1) => 2"
+    assert DummyLive.instances[-1].renderables[-1].text == "🔧 f(x=1) => 2"
+
+
+def test_stream_to_stdout_uses_rich_markdown_options_for_live_updates():
+    DummyConsole.instances = []
+    DummyLive.instances = []
+    out = TTYStringIO()
+    text = stream_to_stdout(["`x`"], formatter_cls=DummyFormatter, out=out, code_theme="github-dark", console_cls=DummyConsole,
+                            markdown_cls=DummyMarkdown, live_cls=DummyLive)
 
     assert text == "`x`"
-    md = DummyConsole.instances[-1].printed[-1]
+    md = DummyLive.instances[-1].renderables[-1]
     assert md.text == "`x`"
     assert md.kwargs == dict(code_theme="github-dark", inline_code_theme="github-dark", inline_code_lexer="python")
 
 
-def test_display_line_count_accounts_for_wrapped_terminal_lines():
+def test_stream_to_stdout_updates_live_markdown_as_chunks_arrive():
+    DummyConsole.instances = []
+    DummyLive.instances = []
     out = TTYStringIO()
-    assert _display_line_count(out, "x" * 200) > 1
+    text = stream_to_stdout(["a", "b"], formatter_cls=DummyFormatter, out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
 
-
-def test_clear_terminal_block_does_not_move_above_input_line():
-    out = TTYStringIO()
-    _clear_terminal_block(out, "abc\n")
-    assert out.getvalue().startswith("\x1b[1F\x1b[J")
+    assert text == "ab"
+    assert [o.text for o in DummyLive.instances[-1].renderables] == ["a", "ab"]
+    assert out.getvalue() == "RICH:ab"
 
 
 def test_extension_load_is_idempotent_and_tracks_last_response():

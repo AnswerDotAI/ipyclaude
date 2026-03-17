@@ -34,7 +34,7 @@ Implemented:
 - dynamic code/output context reconstruction
 - ampersand-backtick tool exposure from `user_ns`
 - streaming responses
-- final Rich markdown rendering
+- live Rich markdown rendering in terminal IPython
 - XDG-backed config, startup, and system prompt files
 - optional exact raw prompt/response logging
 
@@ -198,9 +198,10 @@ Streaming and storage are deliberately separated.
 
 `stream_to_stdout()`:
 
-1. streams raw chunks to stdout using `lisette.StreamFormatter`
-2. returns the full original text for storage
-3. if stdout is a TTY, clears the streamed block and re-renders a nicer final view with `rich.Markdown`
+1. uses `lisette.StreamFormatter` to iterate the response stream
+2. in a TTY, updates a `rich.live.Live` view with `Markdown(...)` as chunks arrive
+3. outside a TTY, writes raw chunks to stdout
+4. returns the full original text for storage
 
 The visible output is post-processed by `compact_tool_display()` so lisette tool detail blocks are shown in a shorter form like:
 

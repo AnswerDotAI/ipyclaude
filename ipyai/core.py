@@ -13,8 +13,8 @@ from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, line_cell_magic, magics_class
 from lisette.core import Chat,StreamFormatter
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
-from rich.text import Text
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_THINK = "l"
@@ -119,52 +119,43 @@ def compact_tool_display(text: str, result_chars: int=100) -> str:
     return _tool_block_re.sub(_repl, text)
 
 
-def _with_trailing_newline(text: str) -> str: return text if not text or text.endswith("\n") else text + "\n"
+def _markdown_renderable(text: str, code_theme: str, markdown_cls=Markdown):
+    return markdown_cls(text, code_theme=code_theme, inline_code_theme=code_theme, inline_code_lexer="python")
 
 
-def _display_line_count(out, shown: str) -> int:
-    if not shown: return 0
-    console = Console(file=out, force_terminal=getattr(out, "isatty", lambda: False)(), soft_wrap=True)
-    lines = console.render_lines(Text(shown), pad=False)
-    return len(lines)
-
-
-def _clear_terminal_block(out, shown: str):
-    nlines = _display_line_count(out, shown)
-    if nlines > 1: out.write(f"\x1b[{nlines-1}F")
-    out.write("\x1b[J")
-    out.flush()
-
-
-def _render_markdown(out, text: str, code_theme: str, console_cls=Console, markdown_cls=Markdown):
-    md = markdown_cls(text, code_theme=code_theme, inline_code_theme=code_theme, inline_code_lexer="python")
-    console = console_cls(file=out, force_terminal=getattr(out, "isatty", lambda: False)(), soft_wrap=True)
-    console.print(md)
-
-
-def _rewrite_terminal_output(out, shown: str, rewritten: str, code_theme: str, console_cls=Console, markdown_cls=Markdown):
-    if not getattr(out, "isatty", lambda: False)(): return
-    _clear_terminal_block(out, shown)
-    _render_markdown(out, rewritten, code_theme, console_cls=console_cls, markdown_cls=markdown_cls)
+def _stream_to_live_markdown(chunks, out, code_theme: str, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
+    it = iter(chunks)
+    for first in it:
+        if first: break
+    else: return ""
+    console = console_cls(file=out, force_terminal=True, soft_wrap=True)
+    text = first
+    with live_cls(_markdown_renderable(compact_tool_display(text), code_theme, markdown_cls), console=console,
+                  auto_refresh=False, transient=False) as live:
+        for chunk in it:
+            if not chunk: continue
+            text += chunk
+            live.update(_markdown_renderable(compact_tool_display(text), code_theme, markdown_cls), refresh=True)
+    return text
 
 
 def stream_to_stdout(stream, formatter_cls: Callable[..., StreamFormatter]=StreamFormatter, out=None, code_theme: str=DEFAULT_CODE_THEME,
-                     console_cls=Console, markdown_cls=Markdown) -> str:
+                     console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
     out = sys.stdout if out is None else out
     fmt = formatter_cls()
+    chunks = fmt.format_stream(stream)
+    if getattr(out, "isatty", lambda: False)(): return _stream_to_live_markdown(chunks, out, code_theme, console_cls=console_cls,
+                                                                                markdown_cls=markdown_cls, live_cls=live_cls)
     res = []
-    for chunk in fmt.format_stream(stream):
+    for chunk in chunks:
         if not chunk: continue
         out.write(chunk)
         out.flush()
         res.append(chunk)
     text = "".join(res)
-    shown = _with_trailing_newline(text)
-    if shown != text:
+    if text and not text.endswith("\n"):
         out.write("\n")
         out.flush()
-    rewritten = compact_tool_display(text)
-    if getattr(out, "isatty", lambda: False)(): _rewrite_terminal_output(out, shown, rewritten, code_theme, console_cls=console_cls, markdown_cls=markdown_cls)
     return text
 
 

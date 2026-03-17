@@ -104,11 +104,11 @@ def weather(city): return f"Sunny in {city}"
 
 ## Output Rendering
 
-Responses are streamed directly to the terminal during generation. After streaming completes:
+Responses are streamed directly to the terminal during generation.
 
+- in a TTY, `ipyai` uses Rich `Live(Markdown(...))` so the visible response is rendered as markdown while it streams
 - the stored response remains the original full `lisette` output
-- the visible terminal output is re-rendered with `rich.Markdown`
-- tool call detail blocks are compacted to a short single-line form such as `🔧 f(x=1) => 2`
+- tool call detail blocks are compacted in the visible output to a short single-line form such as `🔧 f(x=1) => 2`
 
 ## Startup Replay
 
