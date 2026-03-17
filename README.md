@@ -27,7 +27,7 @@ If you change the package in a running shell:
 `ipyai` is designed for terminal IPython. To auto-load it, add this to an `ipython_config.py` file used by terminal `ipython`:
 
 ```python
-c.TerminalIPythonApp.extensions = ["ipyai"]
+c.TerminalIPythonApp.extensions = ["ipyai.core"]
 ```
 
 Good places for that file include:
