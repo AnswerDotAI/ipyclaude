@@ -133,9 +133,18 @@ async def _chunks(*items):
     for o in items: yield o
 
 
+def run_stream(*items, **kwargs): return asyncio.run(astream_to_stdout(_chunks(*items), formatter_cls=DummyAsyncFormatter, **kwargs))
+
+
+def mk_ext(load=True, **kwargs):
+    shell = DummyShell()
+    ext = IPyAIExtension(shell=shell, **kwargs)
+    return shell, ext.load() if load else ext
+
+
 def test_astream_to_stdout_collects_streamed_text():
     out = io.StringIO()
-    text = asyncio.run(astream_to_stdout(_chunks("a", "b"), formatter_cls=DummyAsyncFormatter, out=out))
+    text = run_stream("a", "b", out=out)
     assert text == "ab"
     assert out.getvalue() == "ab\n"
 
@@ -174,8 +183,7 @@ def test_astream_to_stdout_uses_live_markdown_for_tty_and_returns_full_text():
     DummyConsole.instances = []
     DummyLive.instances = []
     out = TTYStringIO()
-    text = asyncio.run(astream_to_stdout(_chunks(tool_block), formatter_cls=DummyAsyncFormatter, out=out, console_cls=DummyConsole,
-                                         markdown_cls=DummyMarkdown, live_cls=DummyLive))
+    text = run_stream(tool_block, out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
     assert text == tool_block
     assert out.getvalue() == "RICH:🔧 f(x=1) => 2"
     assert DummyLive.instances[-1].renderables[-1].text == "🔧 f(x=1) => 2"
@@ -185,8 +193,7 @@ def test_astream_to_stdout_uses_rich_markdown_options_for_live_updates():
     DummyConsole.instances = []
     DummyLive.instances = []
     out = TTYStringIO()
-    text = asyncio.run(astream_to_stdout(_chunks("`x`"), formatter_cls=DummyAsyncFormatter, out=out, code_theme="github-dark",
-                                         console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive))
+    text = run_stream("`x`", out=out, code_theme="github-dark", console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
 
     assert text == "`x`"
     md = DummyLive.instances[-1].renderables[-1]
@@ -198,8 +205,7 @@ def test_astream_to_stdout_updates_live_markdown_as_chunks_arrive():
     DummyConsole.instances = []
     DummyLive.instances = []
     out = TTYStringIO()
-    text = asyncio.run(astream_to_stdout(_chunks("a", "b"), formatter_cls=DummyAsyncFormatter, out=out, console_cls=DummyConsole,
-                                         markdown_cls=DummyMarkdown, live_cls=DummyLive))
+    text = run_stream("a", "b", out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
 
     assert text == "ab"
     assert [o.text for o in DummyLive.instances[-1].renderables] == ["a", "ab"]
@@ -227,8 +233,7 @@ def test_patch_syntax_tb_coerces_non_string_msg():
 
 
 def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
-    shell = DummyShell()
-    ext = IPyAIExtension(shell=shell).load()
+    shell,ext = mk_ext()
     ext.load()
     assert shell.input_transformer_manager.cleanup_transforms == [transform_backticks]
     assert len(shell.magics) == 1
@@ -267,9 +272,7 @@ def test_unexpected_prompt_table_schema_is_recreated():
 
 
 def test_config_file_is_created_and_loaded():
-    shell = DummyShell()
-
-    ext = IPyAIExtension(shell=shell)
+    _,ext = mk_ext(load=False)
 
     assert core.CONFIG_PATH.exists()
     assert core.SYSP_PATH.exists()
@@ -288,17 +291,14 @@ def test_config_file_is_created_and_loaded():
 def test_existing_sysp_file_is_loaded():
     sysp_path = core.SYSP_PATH
     sysp_path.write_text("custom sysp")
-    shell = DummyShell()
-
-    ext = IPyAIExtension(shell=shell)
+    _,ext = mk_ext(load=False)
 
     assert ext.system_prompt == "custom sysp"
 
 
 def test_config_values_drive_model_think_and_search(dummy_ai):
     core.CONFIG_PATH.write_text(json.dumps(dict(model="cfg-model", think="m", search="h", log_exact=True)))
-    shell = DummyShell()
-    ext = IPyAIExtension(shell=shell).load()
+    shell,ext = mk_ext()
 
     ext.run_prompt("tell me something")
 
@@ -314,8 +314,7 @@ def test_config_values_drive_model_think_and_search(dummy_ai):
 
 
 def test_handle_line_can_report_and_set_model(capsys):
-    shell = DummyShell()
-    ext = IPyAIExtension(shell=shell, model="old-model", think="m", search="h", code_theme="github-dark", log_exact=True)
+    _,ext = mk_ext(load=False, model="old-model", think="m", search="h", code_theme="github-dark", log_exact=True)
 
     ext.handle_line("")
     assert capsys.readouterr().out == (
@@ -340,10 +339,13 @@ def test_handle_line_can_report_and_set_model(capsys):
     assert ext.code_theme == "ansi_dark"
     assert capsys.readouterr().out == "self.code_theme='ansi_dark'\n"
 
+    ext.handle_line("log_exact false")
+    assert ext.log_exact is False
+    assert capsys.readouterr().out == "self.log_exact=False\n"
+
 
 def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
-    shell = DummyShell()
-    ext = IPyAIExtension(shell=shell).load()
+    shell,ext = mk_ext()
 
     ext.run_prompt("first prompt")
     shell.execution_count = 3
@@ -360,8 +362,7 @@ def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
 
 
 def test_reset_only_deletes_current_session_history(capsys):
-    shell = DummyShell()
-    ext = IPyAIExtension(shell=shell).load()
+    shell,ext = mk_ext()
 
     ext.save_prompt("s1 prompt", "s1 response", 1)
     shell.history_manager.session_number = 2
@@ -439,13 +440,12 @@ def test_startup_replays_code_and_restores_prompts():
     startup_path.write_text(json.dumps(data))
     shell = DummyShell()
     shell.execution_count = 1
-
     ext = IPyAIExtension(shell=shell).load()
 
     assert shell.ran_cells == [("import math", True), ("x = 1", True)]
     assert ext.prompt_rows() == [("hi", "hello")]
     assert ext.prompt_records()[0][3] == 2
-    assert ext.dialog_history(ext.current_prompt_line())[0][0] == "<context><code>import math</code></context>\n<user-request>hi</user-request>"
+    assert ext.dialog_history()[0][0] == "<context><code>import math</code></context>\n<user-request>hi</user-request>"
     assert shell.execution_count == 4
 
 

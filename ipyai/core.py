@@ -56,8 +56,9 @@ prompt_from_lines astream_to_stdout transform_backticks unload_ipython_extension
 
 _prompt_template = """{context}<user-request>{prompt}</user-request>"""
 _tool_re = re.compile(r"&`(\w+)`")
-_tool_block_re = re.compile(r"<details class='tool-usage-details'>\s*<summary>(.*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>",
-    flags=re.DOTALL)
+_tool_block_re = re.compile(
+    r"<details class='tool-usage-details'>\s*<summary>(.*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>", flags=re.DOTALL)
+_status_attrs = "model think search code_theme log_exact".split()
 
 
 def is_backtick_prompt(lines: list[str]) -> bool: return bool(lines) and lines[0].startswith("`")
@@ -108,6 +109,9 @@ def _tool_refs(prompt: str, hist: list[dict]) -> set[str]:
     return names
 
 
+def _event_sort_key(o): return o.get("line", 0), 0 if o.get("kind") == "code" else 1
+
+
 def _single_line(s: str) -> str: return re.sub(r"\s+", " ", s.strip())
 
 
@@ -139,7 +143,7 @@ async def _astream_to_live_markdown(chunks, out, code_theme: str, console_cls=Co
     console = console_cls(file=out, force_terminal=True, soft_wrap=True)
     text = first
     with live_cls(_markdown_renderable(compact_tool_display(text), code_theme, markdown_cls), console=console,
-                  auto_refresh=False, transient=False) as live:
+        auto_refresh=False, transient=False) as live:
         async for chunk in chunks:
             if not chunk: continue
             text += chunk
@@ -153,7 +157,7 @@ async def astream_to_stdout(stream, formatter_cls: Callable[..., AsyncStreamForm
     fmt = formatter_cls()
     chunks = fmt.format_stream(stream)
     if getattr(out, "isatty", lambda: False)(): return await _astream_to_live_markdown(chunks, out, code_theme, console_cls=console_cls,
-                                                                                        markdown_cls=markdown_cls, live_cls=live_cls)
+        markdown_cls=markdown_cls, live_cls=live_cls)
     res = []
     async for chunk in chunks:
         if not chunk: continue
@@ -287,11 +291,11 @@ class IPyAIExtension:
                 prompt TEXT NOT NULL,
                 response TEXT NOT NULL,
                 history_line INTEGER NOT NULL DEFAULT 0)"""
-            self.db.execute( createsql )
+            self.db.execute(createsql)
             cols = [o[1] for o in self.db.execute(f"PRAGMA table_info({PROMPTS_TABLE})")]
             if cols != PROMPTS_COLS:
                 self.db.execute(f"DROP TABLE {PROMPTS_TABLE}")
-                self.db.execute( createsql )
+                self.db.execute(createsql)
             self.db.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROMPTS_TABLE}_session_id ON {PROMPTS_TABLE} (session, id)")
 
     def prompt_records(self, session: int | None=None) -> list:
@@ -335,7 +339,7 @@ class IPyAIExtension:
         ctx = self.code_context(start, stop)
         return _prompt_template.format(context=ctx, prompt=prompt.strip())
 
-    def dialog_history(self, current_prompt_line: int) -> list:
+    def dialog_history(self) -> list:
         hist,res = [],[]
         prev_line = self.reset_line
         for pid,prompt,response,history_line in self.prompt_records():
@@ -346,18 +350,19 @@ class IPyAIExtension:
 
     def resolve_tools(self, prompt: str, hist: list[dict]) -> list:
         ns = self.shell.user_ns
-        names = _tool_refs(prompt, hist)
-        missing = [o for o in _tool_names(prompt) if o not in ns]
+        prompt_names = _tool_names(prompt)
+        missing = [o for o in prompt_names if o not in ns]
         if missing: raise NameError(f"Missing tool(s) in user_ns: {', '.join(sorted(missing))}")
-        bad = [o for o in _tool_names(prompt) if o in ns and not callable(ns[o])]
+        bad = [o for o in prompt_names if not callable(ns[o])]
         if bad: raise TypeError(f"Non-callable tool(s): {', '.join(sorted(bad))}")
-        return [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(names) if o in ns and callable(ns[o])]
+        return [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(_tool_refs(prompt, hist)) if callable(ns.get(o))]
 
     def save_prompt(self, prompt: str, response: str, history_line: int):
         if self.db is None: return
         self.ensure_prompt_table()
-        with self.db: self.db.execute(f"INSERT INTO {PROMPTS_TABLE} (session, prompt, response, history_line) VALUES (?, ?, ?, ?)",
-                                      (self.session_number, prompt, response, history_line))
+        with self.db:
+            self.db.execute(f"INSERT INTO {PROMPTS_TABLE} (session, prompt, response, history_line) VALUES (?, ?, ?, ?)",
+                (self.session_number, prompt, response, history_line))
 
     def startup_events(self) -> list[dict]:
         events = []
@@ -367,7 +372,7 @@ class IPyAIExtension:
             events.append(dict(kind="code", line=line, source=source))
         for pid,prompt,response,history_line in self.prompt_records():
             events.append(dict(kind="prompt", id=pid, line=history_line+1, history_line=history_line, prompt=prompt, response=response))
-        return sorted(events, key=lambda o: (o["line"], 0 if o["kind"] == "code" else 1))
+        return sorted(events, key=_event_sort_key)
 
     def save_startup(self) -> tuple[int,int]:
         data = dict(version=1, events=[{k:v for k,v in o.items() if k != "id"} for o in self.startup_events()])
@@ -383,7 +388,7 @@ class IPyAIExtension:
         if self.current_prompt_line() > 0 or self.prompt_records(): return 0,0
         events = load_startup(STARTUP_PATH)["events"]
         ncode = nprompt = 0
-        for o in sorted(events, key=lambda x: (x.get("line", 0), 0 if x.get("kind") == "code" else 1)):
+        for o in sorted(events, key=_event_sort_key):
             if o.get("kind") == "code":
                 source = o.get("source", "")
                 if not source: continue
@@ -435,48 +440,40 @@ class IPyAIExtension:
         self.loaded = False
         return self
 
+    def _show(self, attr): return print(f"self.{attr}={getattr(self, attr)!r}")
+
+    def _set(self, attr, value):
+        setattr(self, attr, value)
+        return self._show(attr)
+
     def handle_line(self, line: str):
         line = line.strip()
         if not line:
-            print(f"{self.model=}")
-            print(f"{self.think=}")
-            print(f"{self.search=}")
-            print(f"{self.code_theme=}")
-            print(f"{self.log_exact=}")
+            for o in _status_attrs: self._show(o)
             print(f"{CONFIG_PATH=}")
             print(f"{SYSP_PATH=}")
             print(f"{STARTUP_PATH=}")
             return print(f"{LOG_PATH=}")
-        if line == "model": return print(f"{self.model=}")
-        if line == "think": return print(f"{self.think=}")
-        if line == "search": return print(f"{self.search=}")
-        if line == "code_theme": return print(f"{self.code_theme=}")
-        if line == "log_exact": return print(f"{self.log_exact=}")
+        if line in _status_attrs: return self._show(line)
         if line == "reset":
             n = self.reset_session_history()
             return print(f"Deleted {n} AI prompts from session {self.session_number}.")
         if line == "save":
             ncode,nprompt = self.save_startup()
             return print(f"Saved {ncode} code cells and {nprompt} prompts to {STARTUP_PATH}.")
-        if line.startswith("model "):
-            self.model = line.split(None, 1)[1].strip()
-            return print(f"{self.model=}")
-        if line.startswith("think "):
-            self.think = _validate_level("think", line.split(None, 1)[1], self.think)
-            return print(f"{self.think=}")
-        if line.startswith("search "):
-            self.search = _validate_level("search", line.split(None, 1)[1], self.search)
-            return print(f"{self.search=}")
-        if line.startswith("code_theme "):
-            self.code_theme = line.split(None, 1)[1].strip() or DEFAULT_CODE_THEME
-            return print(f"{self.code_theme=}")
+        cmd,_,arg = line.partition(" ")
+        if arg:
+            clean = arg.strip()
+            vals = dict(model=clean, think=_validate_level("think", arg, self.think), search=_validate_level("search", arg, self.search),
+                code_theme=clean or DEFAULT_CODE_THEME, log_exact=_validate_bool("log_exact", arg, self.log_exact))
+            if cmd in vals: return self._set(cmd, vals[cmd])
         return self.run_prompt(line)
 
     async def _run_prompt(self, prompt: str):
         prompt = (prompt or "").rstrip("\n")
         if not prompt.strip(): return None
         history_line = self.current_prompt_line()
-        hist,recs = self.dialog_history(history_line)
+        hist,recs = self.dialog_history()
         tools = self.resolve_tools(prompt, recs)
         full_prompt = self.format_prompt(prompt, self.last_prompt_line()+1, history_line)
         self.shell.user_ns[LAST_PROMPT] = prompt
