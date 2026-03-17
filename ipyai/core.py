@@ -10,7 +10,7 @@ from fastcore.xdg import xdg_config_home
 from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, line_cell_magic, magics_class
-from lisette import Chat,StreamFormatter
+from lisette.core import Chat,StreamFormatter
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.text import Text

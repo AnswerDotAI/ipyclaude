@@ -22,6 +22,30 @@ If you change the package in a running shell:
 %reload_ext ipyai
 ```
 
+## How To Auto-Load `ipyai`
+
+`ipyai` is designed for terminal IPython. To auto-load it, add this to an `ipython_config.py` file used by terminal `ipython`:
+
+```python
+c.TerminalIPythonApp.extensions = ["ipyai"]
+```
+
+Good places for that file include:
+
+- env-local: `{sys.prefix}/etc/ipython/ipython_config.py`
+- user-local: `~/.ipython/profile_default/ipython_config.py`
+- system-wide IPython config directories
+
+In a virtualenv, the env-local path is usually:
+
+- `.venv/etc/ipython/ipython_config.py`
+
+To see which config paths your current `ipython` is searching, run:
+
+```bash
+ipython --debug -c 'exit()' 2>&1 | grep Searching
+```
+
 ## Usage
 
 Only the leading backtick is special. There is no closing delimiter.

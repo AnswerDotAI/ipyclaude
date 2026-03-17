@@ -28,5 +28,3 @@ include = ["ipyai", "ipyai.*"]
 branch = "main"
 changelog_file = "CHANGELOG.md"
 
-[tool.pytest.ini_options]
-pythonpath = ["."]
