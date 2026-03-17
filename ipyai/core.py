@@ -128,7 +128,7 @@ def _stream_to_live_markdown(chunks, out, code_theme: str, console_cls=Console, 
     for first in it:
         if first: break
     else: return ""
-    console = console_cls(file=out, force_terminal=True, soft_wrap=True)
+    console = console_cls(file=out, force_terminal=True, soft_wrap=False)
     text = first
     with live_cls(_markdown_renderable(compact_tool_display(text), code_theme, markdown_cls), console=console,
                   auto_refresh=False, transient=False) as live:
