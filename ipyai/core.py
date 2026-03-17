@@ -1,4 +1,4 @@
-import html,inspect,json,os,re,sqlite3,sys
+import html,inspect,io,json,os,re,sqlite3,sys
 from datetime import datetime,timezone
 from pathlib import Path
 from typing import Callable
@@ -229,6 +229,18 @@ def load_startup(path=None) -> dict:
     path.write_text(json.dumps(data, indent=2) + "\n")
     return data
 
+class TeeIO(io.StringIO):
+    "StringIO that also writes to `real`, so output still appears in the terminal."
+    def __init__(self, real):
+        super().__init__()
+        self._real = real
+    def write(self, s):
+        self._real.write(s)
+        return super().write(s)
+    def flush(self):
+        self._real.flush()
+        super().flush()
+    def isatty(self): return self._real.isatty()
 
 if not hasattr(inspect, "_orig_getfile"):
     @patch_to(inspect, nm="getfile")
@@ -264,6 +276,7 @@ class IPyAIExtension:
         self.log_exact = _validate_bool("log_exact", log_exact if log_exact is not None else cfg["log_exact"], DEFAULT_LOG_EXACT)
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
         load_startup(STARTUP_PATH)
+        self.stream_captures = {}
 
     @property
     def history_manager(self): return getattr(self.shell, "history_manager", None)
@@ -324,6 +337,20 @@ class IPyAIExtension:
 
     def full_history(self) -> list: return self.code_history(1, self.current_input_line()+1)
 
+    def pre_run_cell(self, info):
+        if _is_ipyai_input(info.raw_cell): return
+        sys.stdout = self.tee_out = TeeIO(sys.stdout)
+        sys.stderr = self.tee_err = TeeIO(sys.stderr)
+
+    def post_run_cell(self, result):
+        if not hasattr(self, 'tee_out'): return
+        out = self.tee_out.getvalue()
+        err = self.tee_err.getvalue()
+        sys.stdout = self.tee_out._real
+        sys.stderr = self.tee_err._real
+        if out or err: self.stream_captures[result.execution_count] = dict(stdout=out, stderr=err)
+        del self.tee_out, self.tee_err
+
     def code_context(self, start: int, stop: int) -> str:
         entries = self.code_history(start, stop)
         parts = []
@@ -332,6 +359,7 @@ class IPyAIExtension:
             if not source or _is_ipyai_input(source): continue
             parts.append(_tag("code", _xml_text(source)))
             if output is not None: parts.append(_tag("output", _xml_text(output)))
+            parts.extend(_tag(nm, _xml_text(s)) for nm,s in self.stream_captures.get(line, {}).items() if s)
         if not parts: return ""
         return _tag("context", "".join(parts)) + "\n"
 
@@ -418,12 +446,15 @@ class IPyAIExtension:
 
     def load(self):
         if self.loaded: return self
+        self._orig_system,self.shell.system = self.shell.system,self.shell.system_piped
         self.ensure_prompt_table()
         cts = self.shell.input_transformer_manager.cleanup_transforms
         if transform_backticks not in cts:
             idx = 1 if cts and cts[0] is leading_empty_lines else 0
             cts.insert(idx, transform_backticks)
         self.shell.register_magics(AIMagics(self.shell, self))
+        self.shell.events.register('pre_run_cell', self.pre_run_cell)
+        self.shell.events.register('post_run_cell', self.post_run_cell)
         self.shell.user_ns[EXTENSION_NS] = self
         self.shell.user_ns.setdefault(RESET_LINE_NS, 0)
         setattr(self.shell, EXTENSION_ATTR, self)
@@ -433,10 +464,13 @@ class IPyAIExtension:
 
     def unload(self):
         if not self.loaded: return self
+        self.shell.system = self._orig_system
         cts = self.shell.input_transformer_manager.cleanup_transforms
         if transform_backticks in cts: cts.remove(transform_backticks)
         if self.shell.user_ns.get(EXTENSION_NS) is self: self.shell.user_ns.pop(EXTENSION_NS, None)
         if getattr(self.shell, EXTENSION_ATTR, None) is self: delattr(self.shell, EXTENSION_ATTR)
+        self.shell.events.unregister('pre_run_cell', self.pre_run_cell)
+        self.shell.events.unregister('post_run_cell', self.post_run_cell)
         self.loaded = False
         return self
 

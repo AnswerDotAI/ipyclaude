@@ -9,7 +9,7 @@ from IPython.core.ultratb import SyntaxTB
 import ipyai.core as core
 from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
-    IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_backticks)
+    IPyAIExtension, TeeIO, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_backticks)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -83,6 +83,7 @@ class DummyShell:
         self.execution_count = 2
         self.ran_cells = []
         self.loop_runner = asyncio.run
+        self.events = SimpleNamespace(register=lambda *a: None, unregister=lambda *a: None)
 
     def register_magics(self, magics): self.magics.append(magics)
 
@@ -93,6 +94,8 @@ class DummyShell:
             self.execution_count += 1
         return SimpleNamespace(success=True)
 
+    def system(self, cmd): pass
+    def system_piped(self, cmd): pass
 
 @pytest.fixture(autouse=True)
 def _config_paths(monkeypatch, tmp_path):
@@ -417,6 +420,25 @@ def test_context_xml_includes_code_and_outputs_since_last_prompt():
     ctx = ext.code_context(1, 3)
     assert "<context><code>a = 1</code><code>a</code><output>1</output></context>\n" == ctx
 
+def test_teeio_captures_and_forwards():
+    real = io.StringIO()
+    tee = TeeIO(real)
+    tee.write("hello")
+    assert tee.getvalue() == "hello"
+    assert real.getvalue() == "hello"
+
+def test_stream_captures_included_in_context():
+    shell = DummyShell()
+    shell.history_manager.add(1, "print('hi')")
+    shell.history_manager.add(2, "!echo hello")
+    ext = IPyAIExtension(shell=shell).load()
+    ext.stream_captures[1] = dict(stdout="hi\n", stderr="")
+    ext.stream_captures[2] = dict(stdout="hello\n", stderr="warn\n")
+
+    ctx = ext.code_context(1, 3)
+    assert "<stdout>hi\n</stdout>" in ctx
+    assert "<stdout>hello\n</stdout>" in ctx
+    assert "<stderr>warn\n</stderr>" in ctx
 
 def test_history_context_uses_lines_since_last_prompt_only():
     shell = DummyShell()
