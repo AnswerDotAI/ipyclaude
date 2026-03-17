@@ -420,7 +420,8 @@ class IPyAIExtension:
                 ncode += 1
                 if getattr(res, "success", True) is False: break
             elif o.get("kind") == "prompt":
-                self.save_prompt(o.get("prompt", ""), o.get("response", ""), self.current_prompt_line())
+                history_line = int(o.get("history_line", max(o.get("line", 1)-1, 0)))
+                self.save_prompt(o.get("prompt", ""), o.get("response", ""), history_line)
                 self._advance_execution_count()
                 nprompt += 1
         return ncode,nprompt

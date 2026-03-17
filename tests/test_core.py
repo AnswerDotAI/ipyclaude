@@ -393,7 +393,7 @@ def test_history_context_uses_lines_since_last_prompt_only():
 def test_startup_replays_code_and_restores_prompts(tmp_path):
     startup_path = tmp_path/"ipyai"/"startup.json"
     startup_path.parent.mkdir(parents=True, exist_ok=True)
-    events = [dict(kind="code", line=1, source="import math"), dict(kind="prompt", line=2, prompt="hi", response="hello"),
+    events = [dict(kind="code", line=1, source="import math"), dict(kind="prompt", line=3, history_line=2, prompt="hi", response="hello"),
               dict(kind="code", line=3, source="x = 1")]
     data = dict(version=1, events=events)
     startup_path.write_text(json.dumps(data))
@@ -404,7 +404,8 @@ def test_startup_replays_code_and_restores_prompts(tmp_path):
 
     assert shell.ran_cells == [("import math", True), ("x = 1", True)]
     assert ext.prompt_rows() == [("hi", "hello")]
-    assert ext.prompt_records()[0][3] == 1
+    assert ext.prompt_records()[0][3] == 2
+    assert ext.dialog_history(ext.current_prompt_line())[0][0] == "<context><code>import math</code></context>\n<user-request>hi</user-request>"
     assert shell.execution_count == 4
 
 
