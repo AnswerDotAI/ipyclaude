@@ -4,6 +4,8 @@
 
 It is aimed at terminal IPython, not notebook frontends. Prompts stream through `lisette`, final output is rendered with `rich`, and prompt history is stored alongside normal IPython history in the same SQLite database.
 
+When imported, `ipyai` also applies two small IPython compatibility fixes borrowed from `ipykernel_helper` for traceback and `inspect.getfile` edge cases.
+
 ## Install
 
 ```bash
@@ -87,7 +89,7 @@ with risks and rollback steps
 
 Behavior:
 
-- `%ipyai` prints the active model, think level, search level, code theme, logging flag, config path, system prompt path, startup path, and exact-log path
+- `%ipyai` prints the active model, think level, search level, code theme, logging flag, and the current config file paths
 - `%ipyai model ...`, `%ipyai think ...`, `%ipyai search ...`, `%ipyai code_theme ...` change the current session only
 - `%ipyai save` writes the current session's code and AI prompts to `startup.json`
 - `%ipyai reset` deletes AI prompt history for the current IPython session and resets the code-context baseline
@@ -101,6 +103,8 @@ def weather(city): return f"Sunny in {city}"
 
 `use &`weather` to answer the question about Brisbane
 ```
+
+The tool name exposed to the model is the namespace name you referenced, so callable objects bound in `user_ns` also work as expected. Async callables are also supported.
 
 ## Output Rendering
 
@@ -128,11 +132,14 @@ This is intended for priming new sessions with imports, helper definitions, tool
 
 ## Configuration
 
-On first load, `ipyai` creates these files under the XDG config directory:
+At import time, `ipyai` defines these XDG-backed module path variables:
 
 - `~/.config/ipyai/config.json`
 - `~/.config/ipyai/sysp.txt`
 - `~/.config/ipyai/startup.json`
+- `~/.config/ipyai/exact-log.jsonl`
+
+Those files are created on demand when `ipyai` first needs them.
 
 `config.json` currently supports:
 
@@ -153,7 +160,7 @@ Notes:
 - `code_theme` is passed to Rich for fenced and inline code styling
 - `log_exact`, when true, appends the exact full prompt sent to the model and the exact raw response returned by the model to `~/.config/ipyai/exact-log.jsonl`
 
-`sysp.txt` is used as the system prompt passed to `lisette.Chat`.
+`sysp.txt` is used as the system prompt passed to `lisette.AsyncChat`.
 
 ## Development
 

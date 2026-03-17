@@ -37,10 +37,11 @@ Implemented:
 - live Rich markdown rendering in terminal IPython
 - XDG-backed config, startup, and system prompt files
 - optional exact raw prompt/response logging
+- minimal IPython compatibility patches for `SyntaxTB` and `inspect.getfile`
 
 ## File Map
 
-- [ipyai/core.py](ipyai/core.py): extension logic, config loading, prompt/history building, tool resolution, streaming, Rich rendering
+- [ipyai/core.py](ipyai/core.py): extension logic, XDG path globals, config loading, prompt/history building, tool resolution, async streaming, Rich rendering
 - [ipyai/__init__.py](ipyai/__init__.py): package exports and version
 - [tests/test_core.py](tests/test_core.py): focused unit tests for the transformation, history, config, tools, and rendering behavior
 - [pyproject.toml](pyproject.toml): packaging and fastship configuration
@@ -93,7 +94,12 @@ The extension lifecycle is:
 2. `IPyAIExtension.load()` registers `%ipyai` / `%%ipyai`, inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`, and applies `startup.json` if the session is still fresh.
 3. Any cell whose first character is `` ` `` is rewritten by `transform_backticks()` into `get_ipython().run_cell_magic('ipyai', '', prompt)`.
 4. `AIMagics.ipyai()` routes line input to `handle_line()` and cell input to `run_prompt()`.
-5. `run_prompt()` reconstructs conversation history, resolves tools, calls `lisette.Chat`, streams the response, optionally writes an exact raw prompt/response log entry, stores the full response, and returns `None`.
+5. `run_prompt()` reconstructs conversation history, resolves tools, runs `lisette.AsyncChat` through IPython's loop runner, streams the response, optionally writes an exact raw prompt/response log entry, stores the full response, and returns `None`.
+
+At import time, `ipyai` also applies two small global IPython bugfixes borrowed from `ipykernel_helper`:
+
+- `SyntaxTB.structured_traceback` coerces non-string `evalue.msg` values to `str`
+- `inspect.getfile` is wrapped to always return a string
 
 ## Why Cleanup Transforms
 
@@ -188,17 +194,18 @@ Tool references are written in prompts as `&\`name\``.
 - looks them up in `shell.user_ns`
 - raises `NameError` for missing tools
 - raises `TypeError` for non-callables
-- passes the resolved callables to `lisette.Chat(..., tools=...)`
+- builds tool schemas with `get_schema_nm(...)` so the exposed tool name matches the namespace symbol instead of `__call__` for callable objects
+- passes those schemas to `lisette.AsyncChat(..., tools=...)`
 
-The tool lookup is intentionally live against the active namespace, so changing a function in the IPython session changes the tool used by subsequent prompts.
+The tool lookup is intentionally live against the active namespace, so changing a function in the IPython session changes the tool used by subsequent prompts. Async callables are handled by `lisette.AsyncChat`, so tool results are awaited correctly.
 
 ## Streaming And Display
 
 Streaming and storage are deliberately separated.
 
-`stream_to_stdout()`:
+`astream_to_stdout()`:
 
-1. uses `lisette.StreamFormatter` to iterate the response stream
+1. uses `lisette.AsyncStreamFormatter` to iterate the response stream
 2. in a TTY, updates a `rich.live.Live` view with `Markdown(...)` as chunks arrive
 3. outside a TTY, writes raw chunks to stdout
 4. returns the full original text for storage
@@ -213,16 +220,16 @@ That rewrite affects only the visible terminal output. SQLite keeps the original
 
 ## Config And System Prompt
 
-XDG paths are used via `fastcore.xdg.xdg_config_home()`:
+XDG-backed module globals are defined at import time:
 
-- `config.json`: model, think, search, Rich code theme, and the exact-log flag
-- `sysp.txt`: system prompt passed as `sp=` to `lisette.Chat`
-- `startup.json`: saved startup snapshot for fresh sessions
-- `exact-log.jsonl`: optional raw prompt/response log output
+- `CONFIG_PATH`: model, think, search, Rich code theme, and the exact-log flag
+- `SYSP_PATH`: system prompt passed as `sp=` to `lisette.AsyncChat`
+- `STARTUP_PATH`: saved startup snapshot for fresh sessions
+- `LOG_PATH`: optional raw prompt/response log output
 
 Creation behavior:
 
-- all three files are auto-created if missing
+- these files are created on demand when first needed
 - the initial `model` defaults from `IPYAI_MODEL` if present
 - runtime `%ipyai model ...` and similar commands change only the live extension object, not the config file
 
@@ -263,7 +270,7 @@ If you want to change tool behavior:
 
 If you want to change terminal rendering:
 
-- edit `compact_tool_display()`, `_clear_terminal_block()`, `_render_markdown()`, or `stream_to_stdout()`
+- edit `compact_tool_display()`, `_astream_to_live_markdown()`, `_markdown_renderable()`, or `astream_to_stdout()`
 
 If you want to change persistence:
 
