@@ -71,6 +71,9 @@ class DummyHistory:
             src,out = self.entries[i]
             yield (0, i, (src, out) if output else src)
 
+class DummyDisplayPublisher:
+    def __init__(self): self._is_publishing = False
+
 class DummyInputTransformerManager:
     def __init__(self): self.cleanup_transforms = []
 
@@ -80,6 +83,7 @@ class DummyShell:
         self.user_ns = {}
         self.magics = []
         self.history_manager = DummyHistory()
+        self.display_pub = DummyDisplayPublisher()
         self.execution_count = 2
         self.ran_cells = []
         self.loop_runner = asyncio.run
@@ -258,6 +262,23 @@ def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
     assert ext.prompt_records()[0][3] == 1
 
 
+def test_run_prompt_suppresses_ipython_output_history_while_streaming(monkeypatch):
+    shell,ext = mk_ext(load=False)
+    seen = []
+
+    async def _fake_astream_to_stdout(stream, **kwargs):
+        seen.append(shell.display_pub._is_publishing)
+        return "".join([o async for o in stream])
+
+    monkeypatch.setattr(core, "AsyncChat", DummyAsyncChat)
+    monkeypatch.setattr(core, "astream_to_stdout", _fake_astream_to_stdout)
+
+    ext.run_prompt("tell me something")
+
+    assert seen == [True]
+    assert shell.display_pub._is_publishing is False
+
+
 def test_unexpected_prompt_table_schema_is_recreated():
     shell = DummyShell()
     with shell.history_manager.db:
@@ -362,6 +383,34 @@ def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
         ("first prompt", "first second"),
         ("second prompt", "first second"),
     ]
+
+
+def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
+    shell,ext = mk_ext()
+    shell.history_manager.add(1, "print('a')", "a")
+    shell.history_manager.add(2, "print(1)", "1")
+    shell.history_manager.add(3, "1+1", "2")
+    shell.execution_count = 5
+
+    ext.run_prompt("What code history do you see in my session exactly?")
+
+    shell.history_manager.add(5, "from IPython.display import HTML,Markdown,Pretty,display")
+    shell.history_manager.add(6, "Markdown('A **b** *c*')", "A **b** *c*")
+    shell.execution_count = 8
+
+    ext.run_prompt("Do you see the earlier prints etc from the first prompt?")
+
+    assert dummy_ai.instances[1].kwargs["hist"] == [
+        "<context><code>print('a')</code><output>a</output><code>print(1)</code><output>1</output><code>1+1</code><output>2</output></context>\n"
+        "<user-request>What code history do you see in my session exactly?</user-request>",
+        "first second",
+    ]
+    assert dummy_ai.instances[1].calls == [(
+        "<context><code>from IPython.display import HTML,Markdown,Pretty,display</code><code>Markdown('A **b** *c*')</code>"
+        "<output>A **b** *c*</output></context>\n<user-request>Do you see the earlier prints etc from the first prompt?</user-request>",
+        True,
+        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK),
+    )]
 
 
 def test_reset_only_deletes_current_session_history(capsys):

@@ -113,6 +113,7 @@ Responses are streamed directly to the terminal during generation.
 - in a TTY, `ipyai` uses Rich `Live(Markdown(...))` so the visible response is rendered as markdown while it streams
 - the stored response remains the original full `lisette` output
 - tool call detail blocks are compacted in the visible output to a short single-line form such as `🔧 f(x=1) => 2`
+- streamed AI responses are intentionally suppressed from IPython's normal `output_history`; `ipyai` stores them in `ai_prompts` instead
 
 ## Startup Replay
 

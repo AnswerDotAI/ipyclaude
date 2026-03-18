@@ -210,6 +210,11 @@ Streaming and storage are deliberately separated.
 3. outside a TTY, writes raw chunks to stdout
 4. returns the full original text for storage
 
+`ipyai` wraps this streaming phase in a small guard that temporarily marks
+`shell.display_pub._is_publishing = True`. That keeps terminal-visible AI output
+out of IPython's normal stdout capture and therefore out of `output_history`,
+while still allowing `ipyai` to store the full response in `ai_prompts`.
+
 The visible output is post-processed by `compact_tool_display()` so lisette tool detail blocks are shown in a shorter form like:
 
 ```text
