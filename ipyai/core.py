@@ -1,4 +1,4 @@
-import html,inspect,json,os,re,sqlite3,sys
+import ast,html,inspect,json,os,re,sqlite3,sys,uuid
 from contextlib import contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from toolslm.funccall import get_schema_nm
+from IPython.core.interactiveshell import InteractiveShell
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_THINK = "l"
@@ -49,7 +50,7 @@ PROMPTS_COLS = ["id", "session", "prompt", "response", "history_line"]
 CONFIG_DIR = xdg_config_home()/"ipyai"
 CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
-STARTUP_PATH = CONFIG_DIR/"startup.json"
+STARTUP_PATH = CONFIG_DIR/"startup.ipynb"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -101,6 +102,16 @@ def _tag(name: str, content="", **attrs) -> str:
 def _is_ipyai_input(source: str) -> bool:
     src = source.lstrip()
     return src.startswith("`") or src.startswith("%ipyai") or src.startswith("%%ipyai")
+
+
+def _is_note(source):
+    try: tree = ast.parse(source)
+    except SyntaxError: return False
+    return (len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr)
+            and isinstance(tree.body[0].value, ast.Constant) and isinstance(tree.body[0].value.value, str))
+
+
+def _note_str(source): return ast.parse(source).body[0].value.value
 
 
 def _tool_names(text: str) -> set[str]: return set(_tool_re.findall(text or ""))
@@ -229,7 +240,35 @@ def load_sysp(path=None) -> str:
     return path.read_text()
 
 
-def _default_startup(): return dict(version=1, events=[])
+def _cell_id(): return uuid.uuid4().hex[:8]
+
+
+def _event_to_cell(o):
+    if o.get("kind") == "code":
+        source = o.get("source", "")
+        if _is_note(source):
+            return dict(id=_cell_id(), cell_type="markdown", source=_note_str(source),
+                        metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0), source=source)))
+        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0))),
+                    outputs=[], execution_count=None)
+    if o.get("kind") == "prompt":
+        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""),
+                    metadata=dict(ipyai=dict(kind="prompt", line=o.get("line", 0),
+                                             history_line=o.get("history_line", 0), prompt=o.get("prompt", ""))))
+
+
+def _cell_to_event(cell):
+    meta = cell.get("metadata", {}).get("ipyai", {})
+    kind = meta.get("kind")
+    if kind == "code":
+        source = meta.get("source") or cell.get("source", "")
+        return dict(kind="code", line=meta.get("line", 0), source=source)
+    if kind == "prompt":
+        return dict(kind="prompt", line=meta.get("line", 0), history_line=meta.get("history_line", 0),
+                    prompt=meta.get("prompt", ""), response=cell.get("source", ""))
+
+
+def _default_startup(): return dict(cells=[], metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
 
 
 def load_startup(path=None) -> dict:
@@ -237,12 +276,15 @@ def load_startup(path=None) -> dict:
     if path.exists():
         data = json.loads(path.read_text())
         if not isinstance(data, dict): raise ValueError(f"Invalid startup format in {path}")
+        if "nbformat" in data:
+            events = [e for c in data.get("cells", []) if (e := _cell_to_event(c)) is not None]
+            return dict(version=int(data.get("metadata", {}).get("ipyai_version", 1)), events=events)
         events = data.get("events", [])
         if not isinstance(events, list): raise ValueError(f"Invalid startup events in {path}")
         return dict(version=int(data.get("version", 1)), events=events)
-    data = _default_startup()
-    path.write_text(json.dumps(data, indent=2) + "\n")
-    return data
+    nb = _default_startup()
+    path.write_text(json.dumps(nb, indent=2) + "\n")
+    return dict(version=1, events=[])
 
 
 if not hasattr(inspect, "_orig_getfile"):
@@ -255,7 +297,6 @@ def structured_traceback(self:SyntaxTB, etype, evalue, etb, tb_offset=None, cont
     if hasattr(evalue, "msg") and not isinstance(evalue.msg, str): evalue.msg = str(evalue.msg)
     return self._orig_structured_traceback(etype, evalue, etb, tb_offset=tb_offset, context=context)
 
-
 @magics_class
 class AIMagics(Magics):
     def __init__(self, shell, ext):
@@ -265,7 +306,7 @@ class AIMagics(Magics):
     @line_cell_magic("ipyai")
     def ipyai(self, line: str="", cell: str | None=None):
         if cell is None: return self.ext.handle_line(line)
-        return self.ext.run_prompt(cell)
+        return self.ext._run_prompt(cell)
 
 
 class IPyAIExtension:
@@ -345,8 +386,10 @@ class IPyAIExtension:
         for _,line,pair in entries:
             source,output = pair
             if not source or _is_ipyai_input(source): continue
-            parts.append(_tag("code", _xml_text(source)))
-            if output is not None: parts.append(_tag("output", _xml_text(output)))
+            if _is_note(source): parts.append(_tag("note", _xml_text(_note_str(source))))
+            else:
+                parts.append(_tag("code", _xml_text(source)))
+                if output is not None: parts.append(_tag("output", _xml_text(output)))
         if not parts: return ""
         return _tag("context", "".join(parts)) + "\n"
 
@@ -390,9 +433,10 @@ class IPyAIExtension:
         return sorted(events, key=_event_sort_key)
 
     def save_startup(self) -> tuple[int,int]:
-        data = dict(version=1, events=[{k:v for k,v in o.items() if k != "id"} for o in self.startup_events()])
-        STARTUP_PATH.write_text(json.dumps(data, indent=2) + "\n")
-        return sum(o["kind"] == "code" for o in data["events"]), sum(o["kind"] == "prompt" for o in data["events"])
+        events = [{k:v for k,v in o.items() if k != "id"} for o in self.startup_events()]
+        nb = dict(cells=[_event_to_cell(e) for e in events], metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
+        STARTUP_PATH.write_text(json.dumps(nb, indent=2) + "\n")
+        return sum(o["kind"] == "code" for o in events), sum(o["kind"] == "prompt" for o in events)
 
     def _advance_execution_count(self):
         if hasattr(self.shell, "execution_count"): self.shell.execution_count += 1
@@ -504,12 +548,22 @@ class IPyAIExtension:
     def run_prompt(self, prompt: str): return self.shell.loop_runner(self._run_prompt(prompt))
 
 
+@patch
+async def run_cell_magic(self:InteractiveShell, magic_name, line, cell):
+    result = self._orig_run_cell_magic(magic_name, line, cell)
+    return await result if inspect.iscoroutine(result) else result
+
+def _await_cell_magic(lines):
+    if lines and 'get_ipython().run_cell_magic(' in lines[0]: lines = ['await ' + lines[0]] + lines[1:]
+    return lines
+
 def create_extension(shell=None, **kwargs):
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
     ext = getattr(shell, EXTENSION_ATTR, None)
     if ext is None: ext = IPyAIExtension(shell=shell, **kwargs)
     if not ext.loaded: ext.load()
+    shell.input_transformer_manager.line_transforms.append(_await_cell_magic)
     return ext
 
 
