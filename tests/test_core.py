@@ -345,7 +345,8 @@ def test_handle_line_can_report_and_set_model(capsys):
 
     ext.handle_line("")
     assert capsys.readouterr().out == (
-        f"self.model='old-model'\nself.think='m'\nself.search='h'\nself.code_theme='github-dark'\nself.log_exact=True\n"
+        f"self.model='old-model'\nself.completion_model='{core.DEFAULT_COMPLETION_MODEL}'\n"
+        f"self.think='m'\nself.search='h'\nself.code_theme='github-dark'\nself.log_exact=True\n"
         f"CONFIG_PATH={core.CONFIG_PATH!r}\nSYSP_PATH={core.SYSP_PATH!r}\nSTARTUP_PATH={core.STARTUP_PATH!r}\n"
         f"LOG_PATH={core.LOG_PATH!r}\n"
     )

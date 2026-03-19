@@ -125,11 +125,13 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 
 ## Keyboard Shortcuts
 
-`ipyai` registers prompt_toolkit keybindings for inserting code from the last AI response into the current IPython input:
+`ipyai` registers prompt_toolkit keybindings:
 
 | Shortcut | Action |
 |---|---|
-| **Alt-Shift-W** | Insert all Python code blocks from the last response |
+| **Alt-.** | AI inline completion (calls Haiku, shows as greyed suggestion — accept with right arrow) |
+| **Alt-Up/Down** | Jump through complete history entries (skips line-by-line in multiline inputs) |
+| **Alt-Shift-W** | Insert all Python code blocks from the last AI response |
 | **Alt-Shift-1** through **Alt-Shift-9** | Insert the Nth code block |
 | **Alt-Shift-Up/Down** | Cycle through code blocks one at a time |
 

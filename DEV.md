@@ -41,7 +41,8 @@ Implemented:
 - streaming responses with live Rich markdown rendering in TTY
 - thinking indicator (🧠) displayed as progress and stripped from display once content arrives
 - tool call display compacted to single-line `🔧 f(x=1) => 2` form
-- keyboard shortcuts: Alt-Shift-W (all code blocks), Alt-Shift-1..9 (nth block) via prompt_toolkit
+- AI inline completion via Alt-. (calls Haiku with session context, shows as prompt_toolkit suggestion)
+- keyboard shortcuts: Alt-Up/Down (history jump), Alt-Shift-W (all code blocks), Alt-Shift-1..9 (nth block), Alt-Shift-Up/Down (cycle blocks) via prompt_toolkit
 - code block extraction uses `mistletoe` markdown parser (not regex) for correctness
 - XDG-backed config, startup, and system prompt files
 - optional exact raw prompt/response logging
@@ -249,10 +250,13 @@ Display processing (`_display_text`):
 
 Registered via prompt_toolkit on `shell.pt_app.key_bindings` during `load()`:
 
-- `escape, W` (Alt-Shift-W): insert all Python/untagged code blocks from `_ai_last_response`
+- `escape, .` (Alt-.): AI inline completion — calls `_ai_complete()` as a background task, which builds a prompt from session context plus the current prefix/suffix and calls Haiku (`COMPLETION_MODEL`). The result is set as `buffer.suggestion` (prompt_toolkit's auto-suggest display), accepted with right-arrow. Cancels safely if the buffer text changes before the response arrives.
+- `escape, up` / `escape, down` (Alt-Up/Down): jump through complete history entries, bypassing line-by-line navigation in multiline inputs (calls `buffer.history_backward()` / `history_forward()`)
+- `escape, W` (Alt-Shift-W): insert all Python code blocks from `_ai_last_response`
 - `escape, !` through `escape, (` (Alt-Shift-1 through Alt-Shift-9): insert the Nth code block
+- `escape, s-up` / `escape, s-down` (Alt-Shift-Up/Down): cycle through code blocks one at a time, replacing the buffer contents; prompt_toolkit swaps A/B for modifier-4 (Alt+Shift) arrows, so the bindings are intentionally inverted
 
-Code blocks are extracted using `mistletoe.Document` and `CodeFence` — only blocks tagged `python`, `py`, or untagged are included.
+Code blocks are extracted using `mistletoe.Document` and `CodeFence` — only blocks tagged `python` or `py` are included.
 
 ## Config And System Prompt
 

@@ -10,7 +10,7 @@ from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, line_cell_magic, magics_class
 from IPython.core.ultratb import SyntaxTB
-from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse
+from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse,contents
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -22,6 +22,8 @@ DEFAULT_THINK = "l"
 DEFAULT_SEARCH = "l"
 DEFAULT_CODE_THEME = "monokai"
 DEFAULT_LOG_EXACT = False
+DEFAULT_COMPLETION_MODEL = "claude-haiku-4-5-20251001"
+_COMPLETION_SP = "You are a code completion engine for IPython. Return ONLY the completion text that should be inserted at the cursor position. No explanation, no markdown, no code fences, no prefix repetition."
 DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside IPython.
 
 The user interacts with you through `ipyai`, an IPython extension that turns input starting with a period into an AI prompt.
@@ -58,7 +60,7 @@ STARTUP_PATH = CONFIG_DIR/"startup.ipynb"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-__all__ = """EXTENSION_ATTR EXTENSION_NS LAST_PROMPT LAST_RESPONSE MAGIC_NAME PROMPTS_TABLE RESET_LINE_NS DEFAULT_MODEL IPyAIExtension
+__all__ = """EXTENSION_ATTR EXTENSION_NS LAST_PROMPT LAST_RESPONSE MAGIC_NAME PROMPTS_TABLE RESET_LINE_NS DEFAULT_MODEL DEFAULT_COMPLETION_MODEL IPyAIExtension
 create_extension CONFIG_PATH SYSP_PATH STARTUP_PATH LOG_PATH is_dot_prompt load_ipython_extension
 prompt_from_lines astream_to_stdout transform_dots unload_ipython_extension""".split()
 
@@ -66,7 +68,7 @@ _prompt_template = """{context}<user-request>{prompt}</user-request>"""
 _tool_re = re.compile(r"&`(\w+)`")
 _tool_block_re = re.compile(
     r"<details class='tool-usage-details'>\s*<summary>(.*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>", flags=re.DOTALL)
-_status_attrs = "model think search code_theme log_exact".split()
+_status_attrs = "model completion_model think search code_theme log_exact".split()
 
 
 def _extract_code_blocks(text):
@@ -226,8 +228,8 @@ def _suppress_output_history(shell):
 
 
 def _default_config():
-    return dict(model=os.environ.get("IPYAI_MODEL", DEFAULT_MODEL), think=DEFAULT_THINK, search=DEFAULT_SEARCH,
-                code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT)
+    return dict(model=os.environ.get("IPYAI_MODEL", DEFAULT_MODEL), completion_model=DEFAULT_COMPLETION_MODEL,
+                think=DEFAULT_THINK, search=DEFAULT_SEARCH, code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT)
 
 
 def load_config(path=None) -> dict:
@@ -239,6 +241,7 @@ def load_config(path=None) -> dict:
         cfg.update({k:v for k,v in data.items() if k in cfg})
     else: path.write_text(json.dumps(cfg, indent=2) + "\n")
     cfg["model"] = str(cfg["model"]).strip() or DEFAULT_MODEL
+    cfg["completion_model"] = str(cfg["completion_model"]).strip() or DEFAULT_COMPLETION_MODEL
     cfg["think"] = _validate_level("think", cfg["think"], DEFAULT_THINK)
     cfg["search"] = _validate_level("search", cfg["search"], DEFAULT_SEARCH)
     cfg["code_theme"] = str(cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
@@ -372,10 +375,11 @@ class AIMagics(Magics):
 
 
 class IPyAIExtension:
-    def __init__(self, shell, model=None, think=None, search=None, code_theme=None, log_exact=None, system_prompt=None):
+    def __init__(self, shell, model=None, completion_model=None, think=None, search=None, code_theme=None, log_exact=None, system_prompt=None):
         self.shell,self.loaded = shell,False
         cfg = load_config(CONFIG_PATH)
         self.model = model or cfg["model"]
+        self.completion_model = completion_model or cfg["completion_model"]
         self.think = _validate_level("think", think if think is not None else cfg["think"], DEFAULT_THINK)
         self.search = _validate_level("search", search if search is not None else cfg["search"], DEFAULT_SEARCH)
         self.code_theme = str(code_theme or cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
@@ -541,6 +545,19 @@ class IPyAIExtension:
     def _register_keybindings(self):
         pt_app = getattr(self.shell, 'pt_app', None)
         if pt_app is None: return
+        # Wrap existing auto-suggest so AI completions survive partial accepts (M-f)
+        # Patch existing auto-suggest so AI completions survive partial accepts (M-f)
+        auto_suggest = pt_app.auto_suggest
+        if auto_suggest:
+            auto_suggest._ai_full_text = None
+            _orig_get = auto_suggest.get_suggestion
+            def _patched_get(buffer, document):
+                from prompt_toolkit.auto_suggest import Suggestion
+                text,ft = document.text,auto_suggest._ai_full_text
+                if ft and ft.startswith(text) and len(ft) > len(text): return Suggestion(ft[len(text):])
+                auto_suggest._ai_full_text = None
+                return _orig_get(buffer, document)
+            auto_suggest.get_suggestion = _patched_get
         ns = self.shell.user_ns
         def _get_blocks(): return _extract_code_blocks(ns.get(LAST_RESPONSE, ''))
         @pt_app.key_bindings.add('escape', 'W')
@@ -566,6 +583,54 @@ class IPyAIExtension:
         def _cycle_down(event): _cycle(event, 1)
         @pt_app.key_bindings.add('escape', 's-down')  # physical Alt-Shift-Up
         def _cycle_up(event): _cycle(event, -1)
+        # Alt-Up/Down: jump through complete history entries (skips line-by-line)
+        @pt_app.key_bindings.add('escape', 'up')
+        def _hist_back(event): event.current_buffer.history_backward()
+        @pt_app.key_bindings.add('escape', 'down')
+        def _hist_fwd(event): event.current_buffer.history_forward()
+        # Alt-.: AI completion via haiku
+        @pt_app.key_bindings.add('escape', '.')
+        def _ai_suggest(event):
+            buf = event.current_buffer
+            doc = buf.document
+            if not doc.text.strip(): return
+            app = event.app
+            async def _do_complete():
+                try:
+                    text = await self._ai_complete(doc)
+                    if text and buf.document == doc:
+                        from prompt_toolkit.auto_suggest import Suggestion
+                        if auto_suggest: auto_suggest._ai_full_text = doc.text + text
+                        buf.suggestion = Suggestion(text)
+                        app.invalidate()
+                except Exception: pass
+            app.create_background_task(_do_complete())
+
+    async def _ai_complete(self, document):
+        prefix,suffix = document.text_before_cursor,document.text_after_cursor
+        ctx = self.code_context(self.last_prompt_line()+1, self.current_prompt_line())
+        parts = []
+        if ctx: parts.append(ctx)
+        parts.append(f"<current-input>\n<prefix>{_xml_text(prefix)}</prefix>")
+        if suffix.strip(): parts.append(f"<suffix>{_xml_text(suffix)}</suffix>")
+        parts.append("</current-input>")
+        parts.append("\nReturn ONLY the completion text to insert immediately after the prefix."
+                     " Do not repeat the prefix or include any explanation.")
+        chat = AsyncChat(model=self.completion_model, sp=_COMPLETION_SP)
+        res = await chat("\n".join(parts))
+        return (contents(res).content or "").strip()
+
+    @staticmethod
+    def _patch_lexer():
+        from IPython.terminal.ptutils import IPythonPTLexer
+        from prompt_toolkit.lexers import SimpleLexer
+        _plain = SimpleLexer()
+        _orig = IPythonPTLexer.lex_document
+        def _lex_document(self, document):
+            text = document.text.lstrip()
+            if text.startswith('.') or text.startswith('%%ipyai'): return _plain.lex_document(document)
+            return _orig(self, document)
+        IPythonPTLexer.lex_document = _lex_document
 
     def load(self):
         if self.loaded: return self
@@ -579,6 +644,7 @@ class IPyAIExtension:
         self.shell.user_ns.setdefault(RESET_LINE_NS, 0)
         setattr(self.shell, EXTENSION_ATTR, self)
         self._register_keybindings()
+        self._patch_lexer()
         self.apply_startup()
         self.loaded = True
         return self
@@ -616,7 +682,8 @@ class IPyAIExtension:
         cmd,_,arg = line.partition(" ")
         if arg:
             clean = arg.strip()
-            vals = dict(model=lambda: clean, think=lambda: _validate_level("think", clean, self.think),
+            vals = dict(model=lambda: clean, completion_model=lambda: clean or DEFAULT_COMPLETION_MODEL,
+                think=lambda: _validate_level("think", clean, self.think),
                 search=lambda: _validate_level("search", clean, self.search), code_theme=lambda: clean or DEFAULT_CODE_THEME,
                 log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
