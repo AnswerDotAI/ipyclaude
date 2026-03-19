@@ -34,16 +34,20 @@ Implemented:
 - startup snapshot save/replay through `startup.ipynb` (nbformat v4.5 with cell IDs)
 - notes saved as markdown cells, code as code cells, prompts as markdown with metadata
 - dynamic code/output/note context reconstruction
-- ampersand-backtick tool exposure from `user_ns`
+- unified tool discovery from prompts, skills, notes, and tool responses via `_tool_refs()`
+- `_parse_frontmatter()` shared helper for extracting YAML frontmatter from skills, notes, and tool results
+- `allowed-tools` frontmatter key in skills and notes for declaring tool dependencies
+- tool results with qualifying frontmatter (`allowed-tools` or `eval: true`) contribute tools
 - Agent Skills discovery from `.agents/skills/` (CWD + parents) and `~/.config/agents/skills/`
-- `load_skill` tool automatically available when skills are found (returns `FullResponse` to avoid truncation)
+- `load_skill` tool added to `user_ns` at init time, resolved via normal tool mechanism (not special-cased)
 - skills list frozen at extension load time (security: prevents LLM from creating and loading skills mid-session)
 - streaming responses with live Rich markdown rendering in TTY
 - thinking indicator (🧠) displayed as progress and stripped from display once content arrives
 - tool call display compacted to single-line `🔧 f(x=1) => 2` form
-- AI inline completion via Alt-. (calls Haiku with session context, shows as prompt_toolkit suggestion)
+- AI inline completion via Alt-. (calls `completion_model` with session context, shows as prompt_toolkit suggestion; partial accept via M-f preserves remaining suggestion)
 - keyboard shortcuts: Alt-Up/Down (history jump), Alt-Shift-W (all code blocks), Alt-Shift-1..9 (nth block), Alt-Shift-Up/Down (cycle blocks) via prompt_toolkit
 - code block extraction uses `mistletoe` markdown parser (not regex) for correctness
+- syntax highlighting disabled for `.` prompts and `%%ipyai` cells (patches `IPythonPTLexer` at class level)
 - XDG-backed config, startup, and system prompt files
 - optional exact raw prompt/response logging
 - minimal IPython compatibility patches for `SyntaxTB` and `inspect.getfile`
@@ -216,14 +220,28 @@ Rules:
 
 Tool references are written in prompts as `&`name``.
 
+Tools are discovered from multiple sources via `_tool_refs()`:
+
+- `&`name`` in the current prompt and prior prompts in dialog history
+- `allowed-tools` frontmatter and `&`name`` mentions in skills
+- `&`name`` mentions and `allowed-tools` frontmatter in notes (string-literal cells)
+- tool results in stored AI responses whose frontmatter contains `allowed-tools` or `eval: true`
+
+Shared helpers:
+
+- `_parse_frontmatter(text)` extracts YAML frontmatter from any text (reused by skills, notes, and tool results)
+- `_allowed_tools(text)` combines frontmatter `allowed-tools` and `&`name`` mentions into a set of tool names
+- `_tool_results(response)` scans stored response `<details>` blocks for qualifying tool results
+
 `resolve_tools()`:
 
-- finds tool names in the current prompt and prior prompts in the rebuilt dialog history
-- looks them up in `shell.user_ns`
-- raises `NameError` for missing tools
-- raises `TypeError` for non-callables
+- validates tools from the current prompt (raises `NameError`/`TypeError` for missing or non-callable)
+- collects all tool names from all sources via `_tool_refs()`
+- silently skips tools from non-prompt sources that are missing from `user_ns`
 - builds tool schemas with `get_schema_nm(...)` so the exposed tool name matches the namespace symbol instead of `__call__` for callable objects
 - passes those schemas to `lisette.AsyncChat(..., tools=...)`
+
+The `load_skill` tool is added to `user_ns` at extension init time when skills are discovered. It is resolved through the normal tool mechanism (skills always contribute `load_skill` to the tool name set) rather than being special-cased in `_run_prompt`.
 
 The tool lookup is intentionally live against the active namespace, so changing a function in the IPython session changes the tool used by subsequent prompts. Async callables are handled by `lisette.AsyncChat`, so tool results are awaited correctly.
 
@@ -250,7 +268,7 @@ Display processing (`_display_text`):
 
 Registered via prompt_toolkit on `shell.pt_app.key_bindings` during `load()`:
 
-- `escape, .` (Alt-.): AI inline completion — calls `_ai_complete()` as a background task, which builds a prompt from session context plus the current prefix/suffix and calls Haiku (`COMPLETION_MODEL`). The result is set as `buffer.suggestion` (prompt_toolkit's auto-suggest display), accepted with right-arrow. Cancels safely if the buffer text changes before the response arrives.
+- `escape, .` (Alt-.): AI inline completion — calls `_ai_complete()` as a background task, which builds a prompt from session context plus the current prefix/suffix and calls the configured `completion_model`. The result is set as `buffer.suggestion` (prompt_toolkit's auto-suggest display), accepted with right-arrow or word-at-a-time with M-f. IPython's existing auto-suggest `get_suggestion` is patched to remember the AI target text so partial accepts regenerate the remainder. Cancels safely if the buffer text changes before the response arrives.
 - `escape, up` / `escape, down` (Alt-Up/Down): jump through complete history entries, bypassing line-by-line navigation in multiline inputs (calls `buffer.history_backward()` / `history_forward()`)
 - `escape, W` (Alt-Shift-W): insert all Python code blocks from `_ai_last_response`
 - `escape, !` through `escape, (` (Alt-Shift-1 through Alt-Shift-9): insert the Nth code block
@@ -285,7 +303,8 @@ Coverage currently focuses on:
 - cleanup-transform rewriting
 - prompt/history persistence
 - context generation including notes (`<note>` tags)
-- tool resolution
+- tool resolution including unified discovery from skills, notes, and tool responses
+- frontmatter parsing (`_parse_frontmatter`) and `allowed-tools` extraction
 - config and system prompt file creation
 - startup save/replay in ipynb format with cell IDs
 - startup round-trip for notes (markdown cells with preserved source)
@@ -314,11 +333,11 @@ If you want to change notes behavior:
 
 If you want to change tool behavior:
 
-- edit `_tool_names()`, `_tool_refs()`, or `resolve_tools()`
+- edit `_tool_names()`, `_tool_refs()`, `_parse_frontmatter()`, `_allowed_tools()`, `_tool_results()`, or `resolve_tools()`
 
 If you want to change skills:
 
-- edit `_parse_skill()`, `_discover_skills()`, `_skills_xml()`, `load_skill()`, and the skills block in `_run_prompt()`
+- edit `_parse_skill()`, `_discover_skills()`, `_skills_xml()`, `load_skill()`, and the skills/tool collection in `_run_prompt()`
 
 If you want to change terminal rendering:
 
@@ -335,6 +354,14 @@ If you want to change the startup notebook format:
 If you want to change keybindings:
 
 - edit `_register_keybindings()` and `_extract_code_blocks()`
+
+If you want to change AI inline completion:
+
+- edit `_ai_complete()`, `_COMPLETION_SP`, and the `escape, .` binding in `_register_keybindings()`
+
+If you want to change syntax highlighting:
+
+- edit `_patch_lexer()`
 
 ## Working Assumptions
 

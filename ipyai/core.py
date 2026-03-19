@@ -123,9 +123,45 @@ def _note_str(source): return ast.parse(source).body[0].value.value
 def _tool_names(text: str) -> set[str]: return set(_tool_re.findall(text or ""))
 
 
-def _tool_refs(prompt: str, hist: list[dict]) -> set[str]:
+def _parse_frontmatter(text):
+    "Return (frontmatter_dict, body) or (None, text)."
+    if not text or not text.startswith('---'): return None, text
+    end = text.find('\n---', 3)
+    if end == -1: return None, text
+    try: fm = yaml.safe_load(text[3:end])
+    except Exception: return None, text
+    return (fm, text[end+4:].lstrip('\n')) if isinstance(fm, dict) else (None, text)
+
+
+def _allowed_tools(text):
+    "Extract tool names from frontmatter allowed-tools and &`tool` mentions."
+    fm, body = _parse_frontmatter(text)
+    names = _tool_names(text)
+    if fm:
+        at = fm.get('allowed-tools', '')
+        if at: names |= set(str(at).split())
+    return names
+
+
+def _tool_results(response):
+    "Extract tool names from qualifying tool results in a stored AI response."
+    names = set()
+    for m in _tool_block_re.finditer(response or ""):
+        try: result = str(json.loads(m.group(2)).get("result", ""))
+        except Exception: continue
+        fm, _ = _parse_frontmatter(result)
+        if fm and (fm.get('allowed-tools') or fm.get('eval')): names |= _allowed_tools(result)
+    return names
+
+
+def _tool_refs(prompt, hist, skills=None, notes=None, responses=None):
     names = _tool_names(prompt)
     for o in hist: names |= _tool_names(o["prompt"])
+    if skills:
+        names.add("load_skill")
+        for s in skills: names |= set(s.get("tools") or [])
+    for n in (notes or []): names |= _allowed_tools(n)
+    for r in (responses or []): names |= _tool_results(r)
     return names
 
 
@@ -306,15 +342,12 @@ def _parse_skill(path):
     skill_md = Path(path) / "SKILL.md"
     if not skill_md.exists(): return None
     text = skill_md.read_text()
-    if not text.startswith('---'): return None
-    end = text.find('\n---', 3)
-    if end == -1: return None
-    try: fm = yaml.safe_load(text[3:end])
-    except Exception: return None
-    if not isinstance(fm, dict): return None
+    fm, body = _parse_frontmatter(text)
+    if not fm: return None
     name = fm.get('name', '')
     if not name: return None
-    return dict(name=name, path=str(path), description=fm.get('description', ''))
+    tools = list(_allowed_tools(text))
+    return dict(name=name, path=str(path), description=fm.get('description', ''), tools=tools)
 
 
 def _discover_skills(cwd=None):
@@ -386,6 +419,7 @@ class IPyAIExtension:
         self.log_exact = _validate_bool("log_exact", log_exact if log_exact is not None else cfg["log_exact"], DEFAULT_LOG_EXACT)
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
         self.skills = _discover_skills()
+        if self.skills: shell.user_ns["load_skill"] = load_skill
         load_startup(STARTUP_PATH)
 
     @property
@@ -473,14 +507,20 @@ class IPyAIExtension:
             prev_line = history_line
         return hist,res
 
-    def resolve_tools(self, prompt: str, hist: list[dict]) -> list:
+    def note_strings(self, start, stop):
+        "Return note string values from code history in range."
+        return [_note_str(src) for _,_,pair in self.code_history(start, stop)
+                if (src := pair[0]) and _is_note(src)]
+
+    def resolve_tools(self, prompt, hist, skills=None, notes=None, responses=None):
         ns = self.shell.user_ns
         prompt_names = _tool_names(prompt)
         missing = [o for o in prompt_names if o not in ns]
         if missing: raise NameError(f"Missing tool(s) in user_ns: {', '.join(sorted(missing))}")
         bad = [o for o in prompt_names if not callable(ns[o])]
         if bad: raise TypeError(f"Non-callable tool(s): {', '.join(sorted(bad))}")
-        return [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(_tool_refs(prompt, hist)) if callable(ns.get(o))]
+        all_refs = _tool_refs(prompt, hist, skills=skills, notes=notes, responses=responses)
+        return [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(all_refs) if callable(ns.get(o))]
 
     def save_prompt(self, prompt: str, response: str, history_line: int):
         if self.db is None: return
@@ -694,15 +734,20 @@ class IPyAIExtension:
         if not prompt.strip(): return None
         history_line = self.current_prompt_line()
         hist,recs = self.dialog_history()
-        tools = self.resolve_tools(prompt, recs)
+        # Collect notes and responses for tool resolution
+        notes = []
+        prev_line = self.reset_line
+        for o in recs:
+            notes += self.note_strings(prev_line+1, o["history_line"])
+            prev_line = o["history_line"]
+        notes += self.note_strings(self.last_prompt_line()+1, history_line)
+        responses = [o["response"] for o in recs]
+        tools = self.resolve_tools(prompt, recs, skills=self.skills, notes=notes, responses=responses)
         full_prompt = self.format_prompt(prompt, self.last_prompt_line()+1, history_line)
         self.shell.user_ns[LAST_PROMPT] = prompt
-        ns,sp = self.shell.user_ns,self.system_prompt
-        if self.skills:
-            ns = {**ns, "load_skill": load_skill}
-            tools.append(dict(type="function", function=get_schema_nm("load_skill", ns, pname="parameters")))
-            sp += _skills_xml(self.skills)
-        chat = AsyncChat(model=self.model, sp=sp, ns=ns, hist=hist, tools=tools or None)
+        sp = self.system_prompt
+        if self.skills: sp += _skills_xml(self.skills)
+        chat = AsyncChat(model=self.model, sp=sp, ns=self.shell.user_ns, hist=hist, tools=tools or None)
         stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
         with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, code_theme=self.code_theme)
         self.shell.user_ns[LAST_RESPONSE] = text

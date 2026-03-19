@@ -10,7 +10,8 @@ import ipyai.core as core
 from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
     IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_dots,
-    _parse_skill, _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, load_skill)
+    _parse_skill, _parse_frontmatter, _allowed_tools, _tool_results, _tool_refs,
+    _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, load_skill)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -608,7 +609,7 @@ def _mk_skill(root, name, description="A test skill."):
 def test_parse_skill(tmp_path):
     d = _mk_skill(tmp_path, "my-skill", "Does things.")
     s = _parse_skill(d)
-    assert s == dict(name="my-skill", path=str(d), description="Does things.")
+    assert s == dict(name="my-skill", path=str(d), description="Does things.", tools=[])
 
 
 def test_parse_skill_missing_file(tmp_path):
@@ -683,6 +684,68 @@ def test_run_prompt_includes_skills_tool_and_system_prompt(dummy_ai, tmp_path, m
     assert any("load_skill" in str(t) for t in chat.kwargs.get("tools", []))
     assert "<skills>" in chat.kwargs["sp"]
     assert "test-skill" in chat.kwargs["sp"]
+
+
+def test_parse_frontmatter():
+    fm, body = _parse_frontmatter("---\nname: x\n---\nbody")
+    assert fm == {"name": "x"}
+    assert body == "body"
+
+def test_parse_frontmatter_none():
+    fm, body = _parse_frontmatter("no frontmatter")
+    assert fm is None
+    assert body == "no frontmatter"
+
+def test_allowed_tools_from_frontmatter():
+    text = "---\nallowed-tools: foo bar\n---\nbody"
+    assert _allowed_tools(text) == {"foo", "bar"}
+
+def test_allowed_tools_from_backtick_refs():
+    assert _allowed_tools("use &`mytool` here") == {"mytool"}
+
+def test_allowed_tools_combined():
+    text = "---\nallowed-tools: foo\n---\nuse &`bar` here"
+    assert _allowed_tools(text) == {"foo", "bar"}
+
+def test_skill_allowed_tools(tmp_path):
+    d = tmp_path / "my-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\nname: my-skill\ndescription: x\nallowed-tools: analyze\n---\nuse &`fmt`\n")
+    s = _parse_skill(d)
+    assert set(s["tools"]) == {"analyze", "fmt"}
+
+def test_tool_results_with_allowed_tools():
+    result_text = "---\\nallowed-tools: helper\\n---\\nbody"
+    response = f"<details class='tool-usage-details'>\n<summary>load_skill(path=x)</summary>\n```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"load_skill\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>"
+    assert "helper" in _tool_results(response)
+
+def test_tool_results_with_eval_true():
+    result_text = "---\\neval: true\\n---\\nuse &`compute`"
+    response = f"<details class='tool-usage-details'>\n<summary>myfn()</summary>\n```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"myfn\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>"
+    assert "compute" in _tool_results(response)
+
+def test_tool_results_without_qualifying_frontmatter():
+    result_text = "---\\nname: x\\n---\\nuse &`compute`"
+    response = f"<details class='tool-usage-details'>\n<summary>myfn()</summary>\n```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"myfn\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>"
+    assert _tool_results(response) == set()
+
+def test_tool_refs_includes_skills_and_notes():
+    skills = [dict(name="s", path="/s", description="", tools=["analyze"])]
+    notes = ["---\nallowed-tools: fmt\n---\nuse &`helper`"]
+    refs = _tool_refs("use &`main`", [], skills=skills, notes=notes)
+    assert refs == {"main", "load_skill", "analyze", "fmt", "helper"}
+
+def test_note_tool_refs_in_resolve(dummy_ai):
+    def helper():
+        "A helper tool"
+        return "ok"
+    shell,ext = mk_ext()
+    shell.user_ns["helper"] = helper
+    shell.history_manager.add(1, '"use &`helper` for this"')
+    shell.execution_count = 3
+    ext.run_prompt("do something")
+    chat = dummy_ai.instances[-1]
+    assert any("helper" in str(t) for t in (chat.kwargs.get("tools") or []))
 
 
 def test_strip_thinking_shows_brains_while_thinking():

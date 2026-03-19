@@ -87,6 +87,7 @@ Notes appear in the AI context as `<note>` blocks rather than `<code>` blocks. W
 ```python
 %ipyai
 %ipyai model claude-sonnet-4-6
+%ipyai completion_model claude-haiku-4-5-20251001
 %ipyai think m
 %ipyai search h
 %ipyai code_theme monokai
@@ -96,7 +97,7 @@ Notes appear in the AI context as `<note>` blocks rather than `<code>` blocks. W
 ```
 
 - `%ipyai` — show current settings and config file paths
-- `%ipyai model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
+- `%ipyai model ...` / `completion_model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
 - `%ipyai save` — save the current session (code, notes, and AI history) to `startup.ipynb`
 - `%ipyai reset` — clear AI prompt history for the current session
 
@@ -112,6 +113,14 @@ def weather(city): return f"Sunny in {city}"
 
 Callable objects and async callables are also supported.
 
+Tools are discovered from multiple sources beyond direct `&`name`` mentions in prompts:
+
+- **Skills**: tools listed in `allowed-tools` frontmatter or referenced with `&`name`` in the skill body
+- **Notes**: string-literal cells can contain `&`name`` references or YAML frontmatter with `allowed-tools`
+- **Tool responses**: when a tool result starts with YAML frontmatter containing `allowed-tools` or `eval: true`, any `&`name`` references and `allowed-tools` entries in that result are also added
+
+All discovered tools that exist as callables in the IPython namespace are included in the AI's tool schema.
+
 ## Skills
 
 `ipyai` supports [Agent Skills](https://agentskills.io/) — reusable instruction sets that the AI can load on demand. Skills are discovered at extension load time from:
@@ -119,7 +128,9 @@ Callable objects and async callables are also supported.
 - `.agents/skills/` in the current directory and every parent directory
 - `~/.config/agents/skills/`
 
-Each skill is a directory containing a `SKILL.md` file with YAML frontmatter (`name`, `description`) and markdown instructions. At the start of each conversation, the AI sees a list of available skill names and descriptions. When a request matches a skill, the AI calls the `load_skill` tool to read its full instructions before responding.
+Each skill is a directory containing a `SKILL.md` file with YAML frontmatter (`name`, `description`) and markdown instructions. Skills can also declare `allowed-tools` in their frontmatter (space-delimited list of tool names) to pre-approve tools without requiring explicit `&`name`` mentions in prompts.
+
+At the start of each conversation, the AI sees a list of available skill names and descriptions. When a request matches a skill, the AI calls the `load_skill` tool to read its full instructions before responding.
 
 See the [Agent Skills specification](https://agentskills.io/specification.md) for the full format.
 
@@ -129,13 +140,15 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 
 | Shortcut | Action |
 |---|---|
-| **Alt-.** | AI inline completion (calls Haiku, shows as greyed suggestion — accept with right arrow) |
+| **Alt-.** | AI inline completion (calls Haiku, shows as greyed suggestion — accept with right arrow, or **Alt-f** to accept one word at a time) |
 | **Alt-Up/Down** | Jump through complete history entries (skips line-by-line in multiline inputs) |
 | **Alt-Shift-W** | Insert all Python code blocks from the last AI response |
 | **Alt-Shift-1** through **Alt-Shift-9** | Insert the Nth code block |
 | **Alt-Shift-Up/Down** | Cycle through code blocks one at a time |
 
 Code blocks are extracted from fenced markdown blocks tagged as `python` or `py`. Blocks tagged with other languages (bash, json, etc.) or untagged blocks are skipped.
+
+Syntax highlighting is disabled while typing `.` prompts and `%%ipyai` cells so natural language isn't coloured as Python.
 
 ## Startup Replay
 
@@ -166,6 +179,7 @@ Config files live under `~/.config/ipyai/` and are created on demand:
 ```json
 {
   "model": "claude-sonnet-4-6",
+  "completion_model": "claude-haiku-4-5-20251001",
   "think": "l",
   "search": "l",
   "code_theme": "monokai",
@@ -174,6 +188,7 @@ Config files live under `~/.config/ipyai/` and are created on demand:
 ```
 
 - `model` defaults from the `IPYAI_MODEL` environment variable if set when the config is first created
+- `completion_model` is the model used for Alt-. inline completions
 - `think` and `search` must be one of `l`, `m`, or `h`
 
 ## Development
