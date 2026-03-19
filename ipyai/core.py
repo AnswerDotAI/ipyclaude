@@ -69,21 +69,21 @@ _tool_block_re = re.compile(
 _status_attrs = "model think search code_theme log_exact".split()
 
 
+def _extract_code_blocks(text):
+    from mistletoe import Document
+    from mistletoe.block_token import CodeFence
+    return [child.children[0].content.strip() for child in Document(text).children
+            if isinstance(child, CodeFence) and child.language in ('', 'python', 'py')
+            and child.children and child.children[0].content.strip()]
+
+
 def is_dot_prompt(lines: list[str]) -> bool: return bool(lines) and lines[0].startswith(".")
-
-
-def _drop_continuation_backslashes(lines: list[str]) -> list[str]:
-    res = []
-    for i,line in enumerate(lines):
-        if i < len(lines)-1 and line.endswith("\\\n"): line = line[:-2] + "\n"
-        res.append(line)
-    return res
 
 
 def prompt_from_lines(lines: list[str]) -> str | None:
     if not is_dot_prompt(lines): return None
     first,*rest = lines
-    return "".join(_drop_continuation_backslashes([first[1:], *rest]))
+    return "".join([first[1:], *rest]).replace("\\\n", "\n")
 
 
 def transform_dots(lines: list[str], magic: str=MAGIC_NAME) -> list[str]:
@@ -538,6 +538,21 @@ class IPyAIExtension:
         self.shell.user_ns[RESET_LINE_NS] = self.current_prompt_line()
         return cur.rowcount or 0
 
+    def _register_keybindings(self):
+        pt_app = getattr(self.shell, 'pt_app', None)
+        if pt_app is None: return
+        ns = self.shell.user_ns
+        def _get_blocks(): return _extract_code_blocks(ns.get(LAST_RESPONSE, ''))
+        @pt_app.key_bindings.add('escape', 'W')
+        def _paste_all(event):
+            blocks = _get_blocks()
+            if blocks: event.current_buffer.insert_text('\n'.join(blocks))
+        for i,ch in enumerate('!@#$%^&*(', 1):
+            @pt_app.key_bindings.add('escape', ch)
+            def _paste_nth(event, n=i):
+                blocks = _get_blocks()
+                if len(blocks) >= n: event.current_buffer.insert_text(blocks[n-1])
+
     def load(self):
         if self.loaded: return self
         self.ensure_prompt_table()
@@ -549,6 +564,7 @@ class IPyAIExtension:
         self.shell.user_ns[EXTENSION_NS] = self
         self.shell.user_ns.setdefault(RESET_LINE_NS, 0)
         setattr(self.shell, EXTENSION_ATTR, self)
+        self._register_keybindings()
         self.apply_startup()
         self.loaded = True
         return self

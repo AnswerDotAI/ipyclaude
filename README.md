@@ -1,10 +1,8 @@
 # ipyai
 
-`ipyai` is an IPython extension that turns any input starting with `` ` `` into an AI prompt.
+`ipyai` is an IPython extension that turns any input starting with `.` into an AI prompt.
 
-It is aimed at terminal IPython, not notebook frontends. Prompts stream through `lisette`, final output is rendered with `rich`, and prompt history is stored alongside normal IPython history in the same SQLite database.
-
-When imported, `ipyai` also applies two small IPython compatibility fixes borrowed from `ipykernel_helper` for traceback and `inspect.getfile` edge cases.
+It is aimed at terminal IPython, not notebook frontends.
 
 ## Install
 
@@ -26,7 +24,7 @@ If you change the package in a running shell:
 
 ## How To Auto-Load `ipyai`
 
-`ipyai` is designed for terminal IPython. To auto-load it, add this to an `ipython_config.py` file used by terminal `ipython`:
+Add this to an `ipython_config.py` file used by terminal `ipython`:
 
 ```python
 c.TerminalIPythonApp.extensions = ["ipyai.core"]
@@ -36,11 +34,8 @@ Good places for that file include:
 
 - env-local: `{sys.prefix}/etc/ipython/ipython_config.py`
 - user-local: `~/.ipython/profile_default/ipython_config.py`
-- system-wide IPython config directories
 
-In a virtualenv, the env-local path is usually:
-
-- `.venv/etc/ipython/ipython_config.py`
+In a virtualenv, the env-local path is usually `.venv/etc/ipython/ipython_config.py`.
 
 To see which config paths your current `ipython` is searching, run:
 
@@ -50,18 +45,18 @@ ipython --debug -c 'exit()' 2>&1 | grep Searching
 
 ## Usage
 
-Only the leading backtick is special. There is no closing delimiter.
+Only the leading period is special. There is no closing delimiter.
 
 Single line:
 
 ```python
-`write a haiku about sqlite
+.write a haiku about sqlite
 ```
 
 Multiline paste:
 
 ```python
-`summarize this module:
+.summarize this module:
 focus on state management
 and persistence behavior
 ```
@@ -69,13 +64,25 @@ and persistence behavior
 Backslash-Enter continuation in the terminal:
 
 ```python
-`draft a migration plan \
+.draft a migration plan \
 with risks and rollback steps
 ```
 
 `ipyai` also provides a line and cell magic named `%ipyai` / `%%ipyai`.
 
-## `%ipyai` commands
+Note: `.01 * 3` and similar expressions starting with `.` followed by a digit will be interpreted as prompts. Write `0.01 * 3` instead.
+
+## Notes
+
+Any IPython cell containing only a string literal is treated as a "note". Notes provide context to the AI without being executable code:
+
+```python
+"This is a note explaining what I'm about to do"
+```
+
+Notes appear in the AI context as `<note>` blocks rather than `<code>` blocks. When saving a session, notes are stored as markdown cells in the startup notebook.
+
+## `%ipyai` Commands
 
 ```python
 %ipyai
@@ -83,66 +90,75 @@ with risks and rollback steps
 %ipyai think m
 %ipyai search h
 %ipyai code_theme monokai
+%ipyai log_exact true
 %ipyai save
 %ipyai reset
 ```
 
-Behavior:
-
-- `%ipyai` prints the active model, think level, search level, code theme, logging flag, and the current config file paths
-- `%ipyai model ...`, `%ipyai think ...`, `%ipyai search ...`, `%ipyai code_theme ...` change the current session only
-- `%ipyai save` writes the current session's code and AI prompts to `startup.json`
-- `%ipyai reset` deletes AI prompt history for the current IPython session and resets the code-context baseline
+- `%ipyai` — show current settings and config file paths
+- `%ipyai model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
+- `%ipyai save` — save the current session (code, notes, and AI history) to `startup.ipynb`
+- `%ipyai reset` — clear AI prompt history for the current session
 
 ## Tools
 
-To expose a function from the active IPython namespace as a tool for the current conversation, reference it as `&\`name\`` in the prompt:
+Expose a function from the active IPython namespace as a tool by referencing it with `&`name`` in the prompt:
 
 ```python
 def weather(city): return f"Sunny in {city}"
 
-`use &`weather` to answer the question about Brisbane
+.use &`weather` to answer the question about Brisbane
 ```
 
-The tool name exposed to the model is the namespace name you referenced, so callable objects bound in `user_ns` also work as expected. Async callables are also supported.
+Callable objects and async callables are also supported.
 
-## Output Rendering
+## Skills
 
-Responses are streamed directly to the terminal during generation.
+`ipyai` supports [Agent Skills](https://agentskills.io/) — reusable instruction sets that the AI can load on demand. Skills are discovered at extension load time from:
 
-- in a TTY, `ipyai` uses Rich `Live(Markdown(...))` so the visible response is rendered as markdown while it streams
-- the stored response remains the original full `lisette` output
-- tool call detail blocks are compacted in the visible output to a short single-line form such as `🔧 f(x=1) => 2`
-- streamed AI responses are intentionally suppressed from IPython's normal `output_history`; `ipyai` stores them in `ai_prompts` instead
+- `.agents/skills/` in the current directory and every parent directory
+- `~/.config/agents/skills/`
+
+Each skill is a directory containing a `SKILL.md` file with YAML frontmatter (`name`, `description`) and markdown instructions. At the start of each conversation, the AI sees a list of available skill names and descriptions. When a request matches a skill, the AI calls the `load_skill` tool to read its full instructions before responding.
+
+See the [Agent Skills specification](https://agentskills.io/specification.md) for the full format.
+
+## Keyboard Shortcuts
+
+`ipyai` registers prompt_toolkit keybindings for inserting code from the last AI response into the current IPython input:
+
+| Shortcut | Action |
+|---|---|
+| **Alt-Shift-W** | Insert all Python code blocks from the last response |
+| **Alt-Shift-1** through **Alt-Shift-9** | Insert the Nth code block |
+
+Code blocks are extracted from fenced markdown blocks tagged as `python`, `py`, or untagged. Blocks tagged with other languages (bash, json, etc.) are skipped.
 
 ## Startup Replay
 
-On first load, `ipyai` also creates `~/.config/ipyai/startup.json`.
+`%ipyai save` snapshots the current session to `~/.config/ipyai/startup.ipynb`:
 
-`%ipyai save` snapshots the current IPython session into that file:
+- code cells are saved as code cells (notes become markdown cells)
+- AI prompts are saved with the response as markdown and the prompt in cell metadata
 
-- normal code cells are saved as code events
-- AI prompts are saved as prompt/response events
+When `ipyai` loads into a fresh session, saved code is replayed and saved prompts are restored into the conversation history. This primes new sessions with imports, helpers, tools, and prior AI context without re-running the prompts.
 
-When `ipyai` loads into a fresh terminal IPython session:
+## Output Rendering
 
-- saved code events are replayed with `run_cell(..., store_history=True)`
-- saved prompt/response pairs are inserted into `ai_prompts` for the new session
-
-This is intended for priming new sessions with imports, helper definitions, tools, and prior AI context without re-running the prompts themselves.
+Responses are streamed and rendered as markdown in the terminal via Rich. Thinking indicators (🧠) are displayed during model reasoning and removed once the response begins. Tool calls are compacted to a short form like `🔧 f(x=1) => 2`.
 
 ## Configuration
 
-At import time, `ipyai` defines these XDG-backed module path variables:
+Config files live under `~/.config/ipyai/` and are created on demand:
 
-- `~/.config/ipyai/config.json`
-- `~/.config/ipyai/sysp.txt`
-- `~/.config/ipyai/startup.json`
-- `~/.config/ipyai/exact-log.jsonl`
+| File | Purpose |
+|---|---|
+| `config.json` | Model, think/search level, code theme, log flag |
+| `sysp.txt` | System prompt |
+| `startup.ipynb` | Saved session snapshot |
+| `exact-log.jsonl` | Raw prompt/response log (when `log_exact` is enabled) |
 
-Those files are created on demand when `ipyai` first needs them.
-
-`config.json` currently supports:
+`config.json` supports:
 
 ```json
 {
@@ -154,14 +170,8 @@ Those files are created on demand when `ipyai` first needs them.
 }
 ```
 
-Notes:
-
-- `model` defaults from `IPYAI_MODEL` if that environment variable is set when the config file is first created
+- `model` defaults from the `IPYAI_MODEL` environment variable if set when the config is first created
 - `think` and `search` must be one of `l`, `m`, or `h`
-- `code_theme` is passed to Rich for fenced and inline code styling
-- `log_exact`, when true, appends the exact full prompt sent to the model and the exact raw response returned by the model to `~/.config/ipyai/exact-log.jsonl`
-
-`sysp.txt` is used as the system prompt passed to `lisette.AsyncChat`.
 
 ## Development
 

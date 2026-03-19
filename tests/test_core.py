@@ -10,7 +10,7 @@ import ipyai.core as core
 from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
     IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_dots,
-    _parse_skill, _discover_skills, _skills_xml, _strip_thinking, load_skill)
+    _parse_skill, _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, load_skill)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -705,3 +705,13 @@ def test_live_stream_strips_thinking_from_display():
     rendered = [o.text for o in DummyLive.instances[-1].renderables]
     assert rendered[0] == "🧠🧠🧠"
     assert rendered[-1] == "Hello"
+
+
+def test_extract_code_blocks_python_and_untagged():
+    text = "Here's some code:\n```python\nx = 1\ny = 2\n```\nAnd more:\n```\nz = 3\n```\nBash:\n```bash\necho hi\n```"
+    assert _extract_code_blocks(text) == ["x = 1\ny = 2", "z = 3"]
+
+
+def test_extract_code_blocks_empty_response():
+    assert _extract_code_blocks("") == []
+    assert _extract_code_blocks("no code here") == []
