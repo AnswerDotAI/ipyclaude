@@ -73,7 +73,7 @@ def _extract_code_blocks(text):
     from mistletoe import Document
     from mistletoe.block_token import CodeFence
     return [child.children[0].content.strip() for child in Document(text).children
-            if isinstance(child, CodeFence) and child.language in ('', 'python', 'py')
+            if isinstance(child, CodeFence) and child.language in ('python', 'py')
             and child.children and child.children[0].content.strip()]
 
 
@@ -552,6 +552,20 @@ class IPyAIExtension:
             def _paste_nth(event, n=i):
                 blocks = _get_blocks()
                 if len(blocks) >= n: event.current_buffer.insert_text(blocks[n-1])
+        cycle = dict(idx=-1, resp='')
+        def _cycle(event, delta):
+            resp = ns.get(LAST_RESPONSE, '')
+            blocks = _get_blocks()
+            if not blocks: return
+            if resp != cycle['resp']: cycle.update(idx=-1, resp=resp)
+            cycle['idx'] = (cycle['idx'] + delta) % len(blocks)
+            from prompt_toolkit.document import Document
+            event.current_buffer.document = Document(blocks[cycle['idx']])
+        # prompt_toolkit swaps A/B for modifier-4 (Alt+Shift) arrows
+        @pt_app.key_bindings.add('escape', 's-up')   # physical Alt-Shift-Down
+        def _cycle_down(event): _cycle(event, 1)
+        @pt_app.key_bindings.add('escape', 's-down')  # physical Alt-Shift-Up
+        def _cycle_up(event): _cycle(event, -1)
 
     def load(self):
         if self.loaded: return self

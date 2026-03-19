@@ -131,8 +131,9 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 |---|---|
 | **Alt-Shift-W** | Insert all Python code blocks from the last response |
 | **Alt-Shift-1** through **Alt-Shift-9** | Insert the Nth code block |
+| **Alt-Shift-Up/Down** | Cycle through code blocks one at a time |
 
-Code blocks are extracted from fenced markdown blocks tagged as `python`, `py`, or untagged. Blocks tagged with other languages (bash, json, etc.) are skipped.
+Code blocks are extracted from fenced markdown blocks tagged as `python` or `py`. Blocks tagged with other languages (bash, json, etc.) or untagged blocks are skipped.
 
 ## Startup Replay
 

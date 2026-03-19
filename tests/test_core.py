@@ -707,9 +707,9 @@ def test_live_stream_strips_thinking_from_display():
     assert rendered[-1] == "Hello"
 
 
-def test_extract_code_blocks_python_and_untagged():
-    text = "Here's some code:\n```python\nx = 1\ny = 2\n```\nAnd more:\n```\nz = 3\n```\nBash:\n```bash\necho hi\n```"
-    assert _extract_code_blocks(text) == ["x = 1\ny = 2", "z = 3"]
+def test_extract_code_blocks_python_only():
+    text = "Here's some code:\n```python\nx = 1\ny = 2\n```\nAnd more:\n```\nz = 3\n```\nBash:\n```bash\necho hi\n```\nPy:\n```py\na = 4\n```"
+    assert _extract_code_blocks(text) == ["x = 1\ny = 2", "a = 4"]
 
 
 def test_extract_code_blocks_empty_response():
