@@ -24,7 +24,7 @@ DEFAULT_CODE_THEME = "monokai"
 DEFAULT_LOG_EXACT = False
 DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside IPython.
 
-The user interacts with you through `ipyai`, an IPython extension that turns input starting with a backtick into an AI prompt.
+The user interacts with you through `ipyai`, an IPython extension that turns input starting with a period into an AI prompt.
 
 You may receive:
 - a `<context>` XML block containing recent IPython code, outputs, and notes
@@ -59,8 +59,8 @@ LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 __all__ = """EXTENSION_ATTR EXTENSION_NS LAST_PROMPT LAST_RESPONSE MAGIC_NAME PROMPTS_TABLE RESET_LINE_NS DEFAULT_MODEL IPyAIExtension
-create_extension CONFIG_PATH SYSP_PATH STARTUP_PATH LOG_PATH is_backtick_prompt load_ipython_extension
-prompt_from_lines astream_to_stdout transform_backticks unload_ipython_extension""".split()
+create_extension CONFIG_PATH SYSP_PATH STARTUP_PATH LOG_PATH is_dot_prompt load_ipython_extension
+prompt_from_lines astream_to_stdout transform_dots unload_ipython_extension""".split()
 
 _prompt_template = """{context}<user-request>{prompt}</user-request>"""
 _tool_re = re.compile(r"&`(\w+)`")
@@ -69,7 +69,7 @@ _tool_block_re = re.compile(
 _status_attrs = "model think search code_theme log_exact".split()
 
 
-def is_backtick_prompt(lines: list[str]) -> bool: return bool(lines) and lines[0].startswith("`")
+def is_dot_prompt(lines: list[str]) -> bool: return bool(lines) and lines[0].startswith(".")
 
 
 def _drop_continuation_backslashes(lines: list[str]) -> list[str]:
@@ -81,12 +81,12 @@ def _drop_continuation_backslashes(lines: list[str]) -> list[str]:
 
 
 def prompt_from_lines(lines: list[str]) -> str | None:
-    if not is_backtick_prompt(lines): return None
+    if not is_dot_prompt(lines): return None
     first,*rest = lines
     return "".join(_drop_continuation_backslashes([first[1:], *rest]))
 
 
-def transform_backticks(lines: list[str], magic: str=MAGIC_NAME) -> list[str]:
+def transform_dots(lines: list[str], magic: str=MAGIC_NAME) -> list[str]:
     prompt = prompt_from_lines(lines)
     if prompt is None: return lines
     return [f"get_ipython().run_cell_magic({magic!r}, '', {prompt!r})\n"]
@@ -105,7 +105,7 @@ def _tag(name: str, content="", **attrs) -> str:
 
 def _is_ipyai_input(source: str) -> bool:
     src = source.lstrip()
-    return src.startswith("`") or src.startswith("%ipyai") or src.startswith("%%ipyai")
+    return src.startswith(".") or src.startswith("%ipyai") or src.startswith("%%ipyai")
 
 
 def _is_note(source):
@@ -147,6 +147,14 @@ def compact_tool_display(text: str, result_chars: int=100) -> str:
     return _tool_block_re.sub(_repl, text)
 
 
+def _strip_thinking(text):
+    cleaned = re.sub(r'🧠+\n*', '', text).lstrip('\n')
+    return cleaned if cleaned else text
+
+
+def _display_text(text): return _strip_thinking(compact_tool_display(text))
+
+
 def _markdown_renderable(text: str, code_theme: str, markdown_cls=Markdown):
     return markdown_cls(text, code_theme=code_theme, inline_code_theme=code_theme, inline_code_lexer="python")
 
@@ -160,12 +168,12 @@ async def _astream_to_live_markdown(chunks, out, code_theme: str, console_cls=Co
     if first is None: return ""
     console = console_cls(file=out, force_terminal=True)
     text = first
-    with live_cls(_markdown_renderable(compact_tool_display(text), code_theme, markdown_cls), console=console,
+    with live_cls(_markdown_renderable(_display_text(text), code_theme, markdown_cls), console=console,
         auto_refresh=False, transient=False) as live:
         async for chunk in chunks:
             if not chunk: continue
             text += chunk
-            live.update(_markdown_renderable(compact_tool_display(text), code_theme, markdown_cls), refresh=True)
+            live.update(_markdown_renderable(_display_text(text), code_theme, markdown_cls), refresh=True)
     return text
 
 
@@ -534,9 +542,9 @@ class IPyAIExtension:
         if self.loaded: return self
         self.ensure_prompt_table()
         cts = self.shell.input_transformer_manager.cleanup_transforms
-        if transform_backticks not in cts:
+        if transform_dots not in cts:
             idx = 1 if cts and cts[0] is leading_empty_lines else 0
-            cts.insert(idx, transform_backticks)
+            cts.insert(idx, transform_dots)
         self.shell.register_magics(AIMagics(self.shell, self))
         self.shell.user_ns[EXTENSION_NS] = self
         self.shell.user_ns.setdefault(RESET_LINE_NS, 0)
@@ -548,7 +556,7 @@ class IPyAIExtension:
     def unload(self):
         if not self.loaded: return self
         cts = self.shell.input_transformer_manager.cleanup_transforms
-        if transform_backticks in cts: cts.remove(transform_backticks)
+        if transform_dots in cts: cts.remove(transform_dots)
         if self.shell.user_ns.get(EXTENSION_NS) is self: self.shell.user_ns.pop(EXTENSION_NS, None)
         if getattr(self.shell, EXTENSION_ATTR, None) is self: delattr(self.shell, EXTENSION_ATTR)
         self.loaded = False

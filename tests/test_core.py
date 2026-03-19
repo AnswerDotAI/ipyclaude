@@ -9,8 +9,8 @@ from IPython.core.ultratb import SyntaxTB
 import ipyai.core as core
 from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
-    IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_backticks,
-    _parse_skill, _discover_skills, _skills_xml, load_skill)
+    IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_dots,
+    _parse_skill, _discover_skills, _skills_xml, _strip_thinking, load_skill)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -122,15 +122,15 @@ def dummy_ai(monkeypatch):
 
 
 def test_prompt_from_lines_drops_continuation_backslashes():
-    lines = ["`plan this work\\\n", "with two lines\n"]
+    lines = [".plan this work\\\n", "with two lines\n"]
     assert prompt_from_lines(lines) == "plan this work\nwith two lines\n"
 
 
-def test_transform_backticks_executes_ai_magic_call():
+def test_transform_dots_executes_ai_magic_call():
     seen = {}
     class DummyIPython:
         def run_cell_magic(self, magic, line, cell): seen.update(magic=magic, line=line, cell=cell)
-    code = "".join(transform_backticks(["`hello\n", "world\n"]))
+    code = "".join(transform_dots([".hello\n", "world\n"]))
     exec(code, {"get_ipython": lambda: DummyIPython()})
     assert seen == dict(magic="ipyai", line="", cell="hello\nworld\n")
 
@@ -245,7 +245,7 @@ def test_patch_syntax_tb_coerces_non_string_msg():
 def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
     shell,ext = mk_ext()
     ext.load()
-    assert shell.input_transformer_manager.cleanup_transforms == [transform_backticks]
+    assert shell.input_transformer_manager.cleanup_transforms == [transform_dots]
     assert len(shell.magics) == 1
     assert shell.user_ns[EXTENSION_NS] is ext
 
@@ -517,7 +517,7 @@ def test_startup_roundtrip_preserves_notes():
 def test_history_context_uses_lines_since_last_prompt_only():
     shell = DummyShell()
     shell.history_manager.add(1, "before = 1")
-    shell.history_manager.add(2, "`first prompt")
+    shell.history_manager.add(2, ".first prompt")
     shell.history_manager.add(3, "after = 2")
     shell.execution_count = 3
     ext = IPyAIExtension(shell=shell).load()
@@ -551,7 +551,7 @@ def test_save_writes_startup_snapshot(capsys):
     startup_path = core.STARTUP_PATH
     shell = DummyShell()
     shell.history_manager.add(1, "import math")
-    shell.history_manager.add(2, "`first prompt")
+    shell.history_manager.add(2, ".first prompt")
     shell.history_manager.add(3, "x = 1")
     shell.execution_count = 4
     ext = IPyAIExtension(shell=shell).load()
@@ -589,12 +589,12 @@ def test_log_exact_writes_full_prompt_and_response(dummy_ai):
 
 def test_cleanup_transform_prevents_help_syntax_interference():
     tm = TransformerManager()
-    tm.cleanup_transforms.insert(1, transform_backticks)
+    tm.cleanup_transforms.insert(1, transform_dots)
 
-    code = tm.transform_cell("`I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?")
+    code = tm.transform_cell(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?")
     assert code == "get_ipython().run_cell_magic('ipyai', '', 'I am testing my new AI prompt system.\\nTell me do you see a newline in this prompt?\\n')\n"
-    assert tm.check_complete("`I am testing my new AI prompt system.\\") == ("incomplete", 0)
-    assert tm.check_complete("`I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?") == ("complete", None)
+    assert tm.check_complete(".I am testing my new AI prompt system.\\") == ("incomplete", 0)
+    assert tm.check_complete(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?") == ("complete", None)
 
 
 def _mk_skill(root, name, description="A test skill."):
@@ -682,3 +682,26 @@ def test_run_prompt_includes_skills_tool_and_system_prompt(dummy_ai, tmp_path, m
     assert any("load_skill" in str(t) for t in chat.kwargs.get("tools", []))
     assert "<skills>" in chat.kwargs["sp"]
     assert "test-skill" in chat.kwargs["sp"]
+
+
+def test_strip_thinking_shows_brains_while_thinking():
+    assert _strip_thinking("🧠🧠🧠") == "🧠🧠🧠"
+
+
+def test_strip_thinking_removes_brains_once_content_arrives():
+    assert _strip_thinking("🧠🧠🧠\n\nHello world") == "Hello world"
+
+
+def test_strip_thinking_handles_no_brains():
+    assert _strip_thinking("Hello world") == "Hello world"
+
+
+def test_live_stream_strips_thinking_from_display():
+    DummyConsole.instances = []
+    DummyLive.instances = []
+    out = TTYStringIO()
+    text = run_stream("🧠🧠🧠", "\n\n", "Hello", out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
+    assert text == "🧠🧠🧠\n\nHello"
+    rendered = [o.text for o in DummyLive.instances[-1].renderables]
+    assert rendered[0] == "🧠🧠🧠"
+    assert rendered[-1] == "Hello"
