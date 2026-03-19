@@ -1,4 +1,4 @@
-import ast,html,inspect,json,os,re,sqlite3,sys,uuid
+import ast,html,inspect,json,os,re,sqlite3,sys,uuid,yaml
 from contextlib import contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
@@ -10,7 +10,7 @@ from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, line_cell_magic, magics_class
 from IPython.core.ultratb import SyntaxTB
-from lisette.core import AsyncChat,AsyncStreamFormatter
+from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -27,14 +27,18 @@ DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside IPython.
 The user interacts with you through `ipyai`, an IPython extension that turns input starting with a backtick into an AI prompt.
 
 You may receive:
-- a `<context>` XML block containing recent IPython code and optional outputs
+- a `<context>` XML block containing recent IPython code, outputs, and notes
 - a `<user-request>` XML block containing the user's actual request
+
+Inside `<context>`, entries tagged `<code>` are executed Python cells. Entries tagged `<note>` are user-written notes (cells whose only content is a string literal). Notes provide context and intent but are not executable code.
 
 Earlier user turns in the chat history may also contain their own `<context>` blocks. When answering questions about what you have seen in the IPython session, consider the full chat history, not only the latest `<context>` block.
 
 You can respond in Markdown. Your final visible output in terminal IPython will be rendered with Rich, so normal Markdown formatting, fenced code blocks, lists, and tables are appropriate when useful.
 
 When the user mentions `&`-backtick tool references such as `&`tool_name``, the corresponding callable from the active IPython namespace may be available to you as a tool. Use tools when they will materially improve correctness or completeness; otherwise answer directly.
+
+If a `<skills>` section is appended to this system prompt, it lists available skills. When a user's request matches a skill description, call the `load_skill` tool with the skill's path to load its full instructions before responding.
 
 Assume you are helping an interactive Python user. Prefer concise, accurate, practical responses. When writing code, default to Python unless the user asks for something else.
 """
@@ -287,6 +291,56 @@ def load_startup(path=None) -> dict:
     return dict(version=1, events=[])
 
 
+def _parse_skill(path):
+    skill_md = Path(path) / "SKILL.md"
+    if not skill_md.exists(): return None
+    text = skill_md.read_text()
+    if not text.startswith('---'): return None
+    end = text.find('\n---', 3)
+    if end == -1: return None
+    try: fm = yaml.safe_load(text[3:end])
+    except Exception: return None
+    if not isinstance(fm, dict): return None
+    name = fm.get('name', '')
+    if not name: return None
+    return dict(name=name, path=str(path), description=fm.get('description', ''))
+
+
+def _discover_skills(cwd=None):
+    skills,seen = [],set()
+    def _scan(skills_dir):
+        if not skills_dir.is_dir(): return
+        for p in sorted(skills_dir.iterdir()):
+            rp = str(p.resolve())
+            if not p.is_dir() or rp in seen: continue
+            skill = _parse_skill(p)
+            if skill:
+                seen.add(rp)
+                skills.append(skill)
+    d = Path(cwd) if cwd else Path.cwd()
+    while True:
+        _scan(d / '.agents' / 'skills')
+        if d.parent == d: break
+        d = d.parent
+    _scan(Path.home() / '.config' / 'agents' / 'skills')
+    return skills
+
+
+def _skills_xml(skills):
+    if not skills: return ""
+    parts = ["The following skills are available. To activate a skill and read its full instructions, call the load_skill tool with its path."]
+    for s in skills:
+        parts.append(f'<skill name="{_xml_attr(s["name"])}" path="{_xml_attr(s["path"])}">{_xml_text(s["description"])}</skill>')
+    return "\n" + _tag("skills", "\n".join(parts))
+
+
+def load_skill(path:str):  # path: Path to the skill directory
+    "Load a skill's full instructions from its SKILL.md file."
+    p = Path(path) / "SKILL.md"
+    if not p.exists(): return FullResponse(f"Error: SKILL.md not found at {p}")
+    return FullResponse(p.read_text())
+
+
 if not hasattr(inspect, "_orig_getfile"):
     @patch_to(inspect, nm="getfile")
     def _getfile(obj): return str(inspect._orig_getfile(obj))
@@ -319,6 +373,7 @@ class IPyAIExtension:
         self.code_theme = str(code_theme or cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
         self.log_exact = _validate_bool("log_exact", log_exact if log_exact is not None else cfg["log_exact"], DEFAULT_LOG_EXACT)
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
+        self.skills = _discover_skills()
         load_startup(STARTUP_PATH)
 
     @property
@@ -537,7 +592,12 @@ class IPyAIExtension:
         tools = self.resolve_tools(prompt, recs)
         full_prompt = self.format_prompt(prompt, self.last_prompt_line()+1, history_line)
         self.shell.user_ns[LAST_PROMPT] = prompt
-        chat = AsyncChat(model=self.model, sp=self.system_prompt, ns=self.shell.user_ns, hist=hist, tools=tools or None)
+        ns,sp = self.shell.user_ns,self.system_prompt
+        if self.skills:
+            ns = {**ns, "load_skill": load_skill}
+            tools.append(dict(type="function", function=get_schema_nm("load_skill", ns, pname="parameters")))
+            sp += _skills_xml(self.skills)
+        chat = AsyncChat(model=self.model, sp=sp, ns=ns, hist=hist, tools=tools or None)
         stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
         with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, code_theme=self.code_theme)
         self.shell.user_ns[LAST_RESPONSE] = text

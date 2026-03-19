@@ -9,7 +9,8 @@ from IPython.core.ultratb import SyntaxTB
 import ipyai.core as core
 from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
-    IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_backticks)
+    IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_backticks,
+    _parse_skill, _discover_skills, _skills_xml, load_skill)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -107,6 +108,7 @@ def _config_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(core, "SYSP_PATH", cfg_dir/"sysp.txt")
     monkeypatch.setattr(core, "STARTUP_PATH", cfg_dir/"startup.ipynb")
     monkeypatch.setattr(core, "LOG_PATH", cfg_dir/"exact-log.jsonl")
+    monkeypatch.setattr(core, "_discover_skills", lambda: [])
 
 
 @pytest.fixture
@@ -593,3 +595,90 @@ def test_cleanup_transform_prevents_help_syntax_interference():
     assert code == "get_ipython().run_cell_magic('ipyai', '', 'I am testing my new AI prompt system.\\nTell me do you see a newline in this prompt?\\n')\n"
     assert tm.check_complete("`I am testing my new AI prompt system.\\") == ("incomplete", 0)
     assert tm.check_complete("`I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?") == ("complete", None)
+
+
+def _mk_skill(root, name, description="A test skill."):
+    d = root / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\nInstructions here.\n")
+    return d
+
+
+def test_parse_skill(tmp_path):
+    d = _mk_skill(tmp_path, "my-skill", "Does things.")
+    s = _parse_skill(d)
+    assert s == dict(name="my-skill", path=str(d), description="Does things.")
+
+
+def test_parse_skill_missing_file(tmp_path):
+    assert _parse_skill(tmp_path / "nope") is None
+
+
+def test_parse_skill_missing_name(tmp_path):
+    d = tmp_path / "bad"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\ndescription: no name\n---\n")
+    assert _parse_skill(d) is None
+
+
+def test_discover_skills_walks_parents(tmp_path):
+    skills_dir = tmp_path / "a" / "b" / ".agents" / "skills"
+    _mk_skill(skills_dir, "deep-skill", "Deep.")
+    parent_skills = tmp_path / ".agents" / "skills"
+    _mk_skill(parent_skills, "top-skill", "Top.")
+    cwd = tmp_path / "a" / "b"
+    cwd.mkdir(parents=True, exist_ok=True)
+
+    skills = _discover_skills(cwd=cwd)
+    names = [s["name"] for s in skills]
+    assert "deep-skill" in names
+    assert "top-skill" in names
+    assert names.index("deep-skill") < names.index("top-skill")
+
+
+def test_discover_skills_deduplicates(tmp_path):
+    skills_dir = tmp_path / ".agents" / "skills"
+    _mk_skill(skills_dir, "only-once")
+    skills = _discover_skills(cwd=tmp_path)
+    assert sum(s["name"] == "only-once" for s in skills) == 1
+
+
+def test_skills_xml_empty():
+    assert _skills_xml([]) == ""
+
+
+def test_skills_xml_formats_correctly():
+    skills = [dict(name="my-skill", path="/tmp/my-skill", description="Does things.")]
+    xml = _skills_xml(skills)
+    assert "<skills>" in xml
+    assert 'name="my-skill"' in xml
+    assert 'path="/tmp/my-skill"' in xml
+    assert "Does things." in xml
+    assert "load_skill" in xml
+
+
+def test_load_skill_reads_skill_md(tmp_path):
+    d = _mk_skill(tmp_path, "test-skill")
+    result = load_skill(str(d))
+    assert "Instructions here." in result
+    assert "name: test-skill" in result
+
+
+def test_load_skill_missing_returns_error(tmp_path):
+    result = load_skill(str(tmp_path / "nope"))
+    assert "Error" in result
+
+
+def test_run_prompt_includes_skills_tool_and_system_prompt(dummy_ai, tmp_path, monkeypatch):
+    skills_dir = tmp_path / ".agents" / "skills"
+    _mk_skill(skills_dir, "test-skill", "A test skill.")
+    monkeypatch.setattr(core, "_discover_skills", lambda: _discover_skills(cwd=tmp_path))
+    shell,ext = mk_ext()
+    assert len(ext.skills) == 1
+
+    ext.run_prompt("hello")
+
+    chat = dummy_ai.instances[-1]
+    assert any("load_skill" in str(t) for t in chat.kwargs.get("tools", []))
+    assert "<skills>" in chat.kwargs["sp"]
+    assert "test-skill" in chat.kwargs["sp"]
