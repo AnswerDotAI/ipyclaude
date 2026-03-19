@@ -1,4 +1,4 @@
-import ast,html,inspect,json,os,re,sqlite3,sys,uuid,yaml
+import argparse,ast,atexit,html,inspect,json,os,re,sqlite3,sys,uuid,yaml
 from contextlib import contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
@@ -53,6 +53,22 @@ RESET_LINE_NS = "_ipyai_reset_line"
 STARTUP_APPLIED_NS = "_ipyai_startup_applied"
 PROMPTS_TABLE = "ai_prompts"
 PROMPTS_COLS = ["id", "session", "prompt", "response", "history_line"]
+_PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session INTEGER NOT NULL,
+    prompt TEXT NOT NULL,
+    response TEXT NOT NULL,
+    history_line INTEGER NOT NULL DEFAULT 0)"""
+
+def _ensure_prompts_table(db):
+    if db is None: return
+    with db:
+        db.execute(_PROMPTS_SQL)
+        cols = [o[1] for o in db.execute(f"PRAGMA table_info({PROMPTS_TABLE})")]
+        if cols != PROMPTS_COLS:
+            db.execute(f"DROP TABLE {PROMPTS_TABLE}")
+            db.execute(_PROMPTS_SQL)
+        db.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROMPTS_TABLE}_session_id ON {PROMPTS_TABLE} (session, id)")
 CONFIG_DIR = xdg_config_home()/"ipyai"
 CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
@@ -405,6 +421,52 @@ def structured_traceback(self:SyntaxTB, etype, evalue, etb, tb_offset=None, cont
     if hasattr(evalue, "msg") and not isinstance(evalue.msg, str): evalue.msg = str(evalue.msg)
     return self._orig_structured_traceback(etype, evalue, etb, tb_offset=tb_offset, context=context)
 
+def _git_repo_root(path):
+    "Walk up from `path` looking for `.git`, return repo root or None."
+    p = Path(path).resolve()
+    for d in [p] + list(p.parents):
+        if (d / ".git").exists(): return str(d)
+    return None
+
+_LIST_SQL = """SELECT s.session, s.start, s.end, s.num_cmds, s.remark,
+    (SELECT prompt FROM ai_prompts WHERE session=s.session ORDER BY id DESC LIMIT 1)
+    FROM sessions s WHERE s.remark{w} ORDER BY s.session DESC LIMIT 20"""
+
+def _list_sessions(db, cwd):
+    "Return recent sessions for `cwd`, falling back to git repo root prefix match."
+    rows = db.execute(_LIST_SQL.format(w="=?"), (cwd,)).fetchall()
+    if not rows:
+        repo = _git_repo_root(cwd)
+        if repo: rows = db.execute(_LIST_SQL.format(w=" LIKE ?"), (repo + '%',)).fetchall()
+    return rows
+
+def _fmt_session(sid, start, ncmds, last_prompt, max_prompt=60):
+    "Format a session row as a display string."
+    p = (last_prompt or '').replace('\n', ' ')[:max_prompt]
+    if last_prompt and len(last_prompt) > max_prompt: p += '...'
+    return f"{sid:>6}  {str(start or '')[:19]:20}  {ncmds or 0:>5}  {p}"
+
+def _pick_session(rows):
+    "Show an interactive session picker, return chosen session ID or None."
+    from prompt_toolkit.shortcuts import radiolist_dialog
+    values = [(sid, _fmt_session(sid, start, ncmds, lp)) for sid,start,end,ncmds,remark,lp in rows]
+    return radiolist_dialog(title="Resume session", text="Select a session to resume:", values=values, default=values[0][0]).run()
+
+def resume_session(shell, session_id):
+    "Replace the current fresh session with an existing one."
+    hm = shell.history_manager
+    fresh_id = hm.session_number
+    row = hm.db.execute("SELECT session FROM sessions WHERE session=?", (session_id,)).fetchone()
+    if not row: raise ValueError(f"Session {session_id} not found")
+    with hm.db:
+        hm.db.execute("DELETE FROM sessions WHERE session=?", (fresh_id,))
+        hm.db.execute("UPDATE sessions SET end=NULL WHERE session=?", (session_id,))
+    hm.session_number = session_id
+    max_line = hm.db.execute("SELECT MAX(line) FROM history WHERE session=?", (session_id,)).fetchone()[0]
+    shell.execution_count = (max_line or 0) + 1
+    hm.input_hist_parsed.extend([""] * (shell.execution_count - 1))
+    hm.input_hist_raw.extend([""] * (shell.execution_count - 1))
+
 @magics_class
 class AIMagics(Magics):
     def __init__(self, shell, ext):
@@ -449,21 +511,7 @@ class IPyAIExtension:
         hm = self.history_manager
         return None if hm is None else hm.db
 
-    def ensure_prompt_table(self):
-        if self.db is None: return
-        with self.db:
-            createsql = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session INTEGER NOT NULL,
-                prompt TEXT NOT NULL,
-                response TEXT NOT NULL,
-                history_line INTEGER NOT NULL DEFAULT 0)"""
-            self.db.execute(createsql)
-            cols = [o[1] for o in self.db.execute(f"PRAGMA table_info({PROMPTS_TABLE})")]
-            if cols != PROMPTS_COLS:
-                self.db.execute(f"DROP TABLE {PROMPTS_TABLE}")
-                self.db.execute(createsql)
-            self.db.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROMPTS_TABLE}_session_id ON {PROMPTS_TABLE} (session, id)")
+    def ensure_prompt_table(self): _ensure_prompts_table(self.db)
 
     def prompt_records(self, session: int | None=None) -> list:
         if self.db is None: return []
@@ -729,6 +777,12 @@ class IPyAIExtension:
         if line == "save":
             ncode,nprompt = self.save_startup()
             return print(f"Saved {ncode} code cells and {nprompt} prompts to {STARTUP_PATH}.")
+        if line == "sessions":
+            rows = _list_sessions(self.db, os.getcwd())
+            if not rows: return print("No sessions found for this directory.")
+            print(f"{'ID':>6}  {'Start':20}  {'Cmds':>5}  {'Last prompt'}")
+            for sid,start,end,ncmds,remark,lp in rows: print(_fmt_session(sid, start, ncmds, lp))
+            return
         cmd,_,arg = line.partition(" ")
         if arg:
             clean = arg.strip()
@@ -777,17 +831,42 @@ def _await_cell_magic(lines):
     if lines and 'get_ipython().run_cell_magic(' in lines[0]: lines = ['await ' + lines[0]] + lines[1:]
     return lines
 
-def create_extension(shell=None, **kwargs):
+def create_extension(shell=None, resume=None, **kwargs):
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
+    _ensure_prompts_table(shell.history_manager.db)
+    if resume is not None:
+        if resume == -1:
+            rows = _list_sessions(shell.history_manager.db, os.getcwd())
+            if rows:
+                chosen = _pick_session(rows)
+                if chosen: resume_session(shell, chosen)
+            else: print("No sessions found for this directory.")
+        else: resume_session(shell, resume)
     ext = getattr(shell, EXTENSION_ATTR, None)
     if ext is None: ext = IPyAIExtension(shell=shell, **kwargs)
     if not ext.loaded: ext.load()
     shell.input_transformer_manager.line_transforms.append(_await_cell_magic)
+    hm = shell.history_manager
+    with hm.db:
+        hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
+    sid = hm.session_number
+    atexit.register(lambda: print(f"\nTo resume: ipythonng -r {sid}"))
     return ext
 
 
-def load_ipython_extension(ipython): return create_extension(ipython)
+_ng_parser = argparse.ArgumentParser(add_help=False)
+_ng_parser.add_argument('-r', type=int, nargs='?', const=-1, default=None)
+
+def _parse_ng_flags():
+    "Parse IPYTHONNG_FLAGS env var via argparse."
+    raw = os.environ.pop("IPYTHONNG_FLAGS", "")
+    if not raw: return _ng_parser.parse_args([])
+    return _ng_parser.parse_args(raw.split())
+
+def load_ipython_extension(ipython):
+    flags = _parse_ng_flags()
+    return create_extension(ipython, resume=flags.r)
 
 
 def unload_ipython_extension(ipython):

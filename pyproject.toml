@@ -16,7 +16,7 @@ dependencies = ["fastcore", "ipython>=9", "lisette>=0.0.47", "rich"]
 Source = "https://github.com/answerdotai/ipyai"
 
 [project.optional-dependencies]
-dev = ["build>=1.0.0", "fastship>=0.0.6", "pytest", "twine>=5.0.0"]
+dev = ["build>=1.0.0", "fastship>=0.0.6", "ipythonng", "pytest", "twine>=5.0.0"]
 
 [tool.setuptools.dynamic]
 version = {attr = "ipyai.__version__"}

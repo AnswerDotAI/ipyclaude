@@ -1,4 +1,4 @@
-import asyncio,inspect,io,json,sqlite3
+import asyncio,inspect,io,json,os,sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,7 +11,8 @@ from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
     IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_dots,
     _parse_skill, _parse_frontmatter, _allowed_tools, _tool_results, _tool_refs,
-    _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, _eval_code_blocks, load_skill)
+    _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, _eval_code_blocks, load_skill,
+    _git_repo_root, _list_sessions, resume_session)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -803,3 +804,114 @@ def test_extract_code_blocks_python_only():
 def test_extract_code_blocks_empty_response():
     assert _extract_code_blocks("") == []
     assert _extract_code_blocks("no code here") == []
+
+
+# --- Session persistence tests ---
+
+def _mk_sessions_db():
+    "Create an in-memory DB with the IPython sessions, history, and ai_prompts tables."
+    db = sqlite3.connect(":memory:")
+    db.execute("CREATE TABLE sessions (session INTEGER PRIMARY KEY AUTOINCREMENT, start TEXT, end TEXT, num_cmds INTEGER, remark TEXT)")
+    db.execute("CREATE TABLE history (session INTEGER, line INTEGER, source TEXT, source_raw TEXT)")
+    db.execute("CREATE TABLE ai_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER, prompt TEXT, response TEXT, history_line INTEGER)")
+    return db
+
+def test_git_repo_root(tmp_path):
+    (tmp_path / ".git").mkdir()
+    sub = tmp_path / "a" / "b"
+    sub.mkdir(parents=True)
+    assert _git_repo_root(str(sub)) == str(tmp_path)
+
+def test_git_repo_root_none(tmp_path):
+    assert _git_repo_root(str(tmp_path)) is None or _git_repo_root(str(tmp_path)) != str(tmp_path)
+
+def test_list_sessions_exact_match():
+    db = _mk_sessions_db()
+    db.execute("INSERT INTO sessions VALUES (1, '2025-01-01', '2025-01-01', 5, '/home/user/project')")
+    db.execute("INSERT INTO sessions VALUES (2, '2025-01-02', '2025-01-02', 3, '/home/user/other')")
+    rows = _list_sessions(db, "/home/user/project")
+    assert len(rows) == 1
+    assert rows[0][0] == 1
+    assert rows[0][5] is None  # no ai_prompts table
+
+def test_list_sessions_with_prompts():
+    db = _mk_sessions_db()
+    db.execute("INSERT INTO sessions VALUES (1, '2025-01-01', NULL, 5, '/proj')")
+    db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line) VALUES (1, 'first', 'r1', 0)")
+    db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line) VALUES (1, 'second', 'r2', 1)")
+    rows = _list_sessions(db, "/proj")
+    assert rows[0][5] == "second"
+
+def test_list_sessions_git_fallback(tmp_path):
+    (tmp_path / ".git").mkdir()
+    db = _mk_sessions_db()
+    sub = str(tmp_path / "sub")
+    db.execute("INSERT INTO sessions VALUES (1, '2025-01-01', NULL, 5, ?)", (str(tmp_path),))
+    db.execute("INSERT INTO sessions VALUES (2, '2025-01-02', NULL, 3, ?)", (sub,))
+    rows = _list_sessions(db, sub)
+    assert len(rows) == 1 and rows[0][0] == 2
+    # No exact match for a new subdir — falls back to repo root prefix
+    rows = _list_sessions(db, str(tmp_path / "newsub"))
+    assert len(rows) == 2
+
+def test_resume_session():
+    db = _mk_sessions_db()
+    # Create "old" session
+    db.execute("INSERT INTO sessions VALUES (5, '2025-01-01', '2025-01-01 12:00', 10, '/proj')")
+    db.execute("INSERT INTO history VALUES (5, 1, 'x=1', 'x=1')")
+    db.execute("INSERT INTO history VALUES (5, 2, 'y=2', 'y=2')")
+    # Create "fresh" session (simulating what IPython would do)
+    db.execute("INSERT INTO sessions VALUES (6, '2025-01-02', NULL, NULL, '')")
+    shell = DummyShell()
+    shell.history_manager.db = db
+    shell.history_manager.session_number = 6
+    shell.history_manager.input_hist_parsed = [""]
+    shell.history_manager.input_hist_raw = [""]
+    resume_session(shell, 5)
+    assert shell.history_manager.session_number == 5
+    assert shell.execution_count == 3  # max(line=2) + 1
+    # Fresh session row deleted
+    assert db.execute("SELECT * FROM sessions WHERE session=6").fetchone() is None
+    # Old session reopened (end cleared)
+    row = db.execute("SELECT end FROM sessions WHERE session=5").fetchone()
+    assert row[0] is None
+    # input_hist lists padded
+    assert len(shell.history_manager.input_hist_parsed) == 3  # [""] + 2 pads
+
+def test_resume_session_not_found():
+    db = _mk_sessions_db()
+    db.execute("INSERT INTO sessions VALUES (1, '2025-01-01', NULL, NULL, '')")
+    shell = DummyShell()
+    shell.history_manager.db = db
+    shell.history_manager.session_number = 1
+    with pytest.raises(ValueError, match="Session 99 not found"):
+        resume_session(shell, 99)
+
+def test_store_cwd_in_remark(dummy_ai):
+    shell,ext = mk_ext()
+    # Simulate what create_extension does
+    hm = shell.history_manager
+    hm.db.execute("CREATE TABLE IF NOT EXISTS sessions (session INTEGER PRIMARY KEY, start TEXT, end TEXT, num_cmds INTEGER, remark TEXT)")
+    hm.db.execute("INSERT INTO sessions VALUES (?, ?, NULL, NULL, '')", (hm.session_number, "2025-01-01"))
+    with hm.db:
+        hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
+    row = hm.db.execute("SELECT remark FROM sessions WHERE session=?", (hm.session_number,)).fetchone()
+    assert row[0] == os.getcwd()
+
+def test_handle_line_sessions(dummy_ai):
+    shell,ext = mk_ext()
+    hm = shell.history_manager
+    hm.db.execute("CREATE TABLE IF NOT EXISTS sessions (session INTEGER PRIMARY KEY, start TEXT, end TEXT, num_cmds INTEGER, remark TEXT)")
+    hm.db.execute("CREATE TABLE IF NOT EXISTS ai_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER NOT NULL, prompt TEXT NOT NULL, response TEXT NOT NULL, history_line INTEGER NOT NULL DEFAULT 0)")
+    hm.db.execute("INSERT INTO sessions VALUES (1, '2025-01-01', NULL, 5, ?)", (os.getcwd(),))
+    hm.db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line) VALUES (1, 'hello world', 'hi', 0)")
+    import io as _io
+    buf = _io.StringIO()
+    import sys as _sys
+    old = _sys.stdout
+    _sys.stdout = buf
+    try: ext.handle_line("sessions")
+    finally: _sys.stdout = old
+    out = buf.getvalue()
+    assert "1" in out
+    assert "hello world" in out
