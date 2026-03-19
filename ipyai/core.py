@@ -378,11 +378,21 @@ def _skills_xml(skills):
     return "\n" + _tag("skills", "\n".join(parts))
 
 
+_eval_re = re.compile(r'^#\|\s*eval:\s*true\s*$', re.MULTILINE)
+
+def _eval_code_blocks(text, shell):
+    "Run python code blocks starting with `#| eval: true` via `shell.run_cell`."
+    for block in _extract_code_blocks(text):
+        if _eval_re.match(block.split('\n', 1)[0]): shell.run_cell(block, store_history=False)
+
 def load_skill(path:str):  # path: Path to the skill directory
     "Load a skill's full instructions from its SKILL.md file."
     p = Path(path) / "SKILL.md"
     if not p.exists(): return FullResponse(f"Error: SKILL.md not found at {p}")
-    return FullResponse(p.read_text())
+    text = p.read_text()
+    shell = get_ipython()
+    if shell: _eval_code_blocks(text, shell)
+    return FullResponse(text)
 
 
 if not hasattr(inspect, "_orig_getfile"):

@@ -11,7 +11,7 @@ from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
     IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_dots,
     _parse_skill, _parse_frontmatter, _allowed_tools, _tool_results, _tool_refs,
-    _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, load_skill)
+    _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, _eval_code_blocks, load_skill)
 
 class DummyAsyncFormatter:
     async def format_stream(self, stream):
@@ -97,6 +97,8 @@ class DummyShell:
         if store_history:
             self.history_manager.add(self.execution_count, source)
             self.execution_count += 1
+        try: exec(compile(source, f'<cell-{self.execution_count}>', 'exec'), self.user_ns)
+        except Exception: pass
         return SimpleNamespace(success=True)
 
 
@@ -669,6 +671,28 @@ def test_load_skill_reads_skill_md(tmp_path):
 def test_load_skill_missing_returns_error(tmp_path):
     result = load_skill(str(tmp_path / "nope"))
     assert "Error" in result
+
+def test_eval_code_blocks_runs_eval_true():
+    shell,ext = mk_ext()
+    text = "# Intro\n\n```python\n#|eval: true\ndef foo(): return 42\n```\n\n```python\ndef bar(): return 99\n```"
+    _eval_code_blocks(text, shell)
+    assert shell.user_ns["foo"]() == 42
+    assert "bar" not in shell.user_ns
+
+def test_eval_code_blocks_space_after_pipe():
+    shell,ext = mk_ext()
+    text = "```python\n#| eval: true\nx = 7\n```"
+    _eval_code_blocks(text, shell)
+    assert shell.user_ns["x"] == 7
+
+def test_load_skill_evals_code_blocks(tmp_path):
+    d = tmp_path / "eval-skill"
+    d.mkdir()
+    text = "---\nname: eval-skill\ndescription: test\n---\n\n```python\n#|eval: true\ndef my_tool(): return 'loaded'\n```\n"
+    (d / "SKILL.md").write_text(text)
+    shell,ext = mk_ext()
+    _eval_code_blocks(text, shell)
+    assert shell.user_ns["my_tool"]() == "loaded"
 
 
 def test_run_prompt_includes_skills_tool_and_system_prompt(dummy_ai, tmp_path, monkeypatch):
