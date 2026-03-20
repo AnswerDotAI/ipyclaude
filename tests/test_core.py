@@ -850,9 +850,9 @@ def test_list_sessions_git_fallback(tmp_path):
     db.execute("INSERT INTO sessions VALUES (2, '2025-01-02', NULL, 3, ?)", (sub,))
     rows = _list_sessions(db, sub)
     assert len(rows) == 1 and rows[0][0] == 2
-    # No exact match for a new subdir — falls back to repo root prefix
+    # No exact match for a new subdir — falls back to repo root exact match
     rows = _list_sessions(db, str(tmp_path / "newsub"))
-    assert len(rows) == 2
+    assert len(rows) == 1 and rows[0][0] == 1
 
 def test_resume_session():
     db = _mk_sessions_db()

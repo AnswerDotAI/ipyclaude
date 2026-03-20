@@ -196,7 +196,7 @@ Legacy `startup.json` files (pre-notebook format) are still supported for loadin
 
 Key functions:
 
-- `_list_sessions(db, cwd)` — queries sessions for the given directory, falls back to git repo root prefix match; includes the last AI prompt per session via a subquery on `ai_prompts`
+- `_list_sessions(db, cwd)` — queries sessions for the given directory, falls back to git repo root exact match; includes the last AI prompt per session via a subquery on `ai_prompts`
 - `_fmt_session()` — formats a session row for display (shared by `%ipyai sessions` and the interactive picker)
 - `_pick_session(rows)` — interactive `radiolist_dialog` picker from prompt_toolkit
 - `resume_session(shell, session_id)` — deletes the fresh session row, restores `session_number` and `execution_count`, pads `input_hist_parsed`/`input_hist_raw`, reopens the old session (clears `end` timestamp)

@@ -409,10 +409,10 @@ def load_skill(path:str):  # path: Path to the skill directory
     return FullResponse(text)
 
 
-@patch_to(inspect, nm="getfile", once=True)
+@patch_to(inspect, nm="getfile")
 def _getfile(obj): return str(inspect._orig_getfile(obj))
 
-@patch(once=True)
+@patch()
 def structured_traceback(self:SyntaxTB, etype, evalue, etb, tb_offset=None, context=5):
     if hasattr(evalue, "msg") and not isinstance(evalue.msg, str): evalue.msg = str(evalue.msg)
     return self._orig_structured_traceback(etype, evalue, etb, tb_offset=tb_offset, context=context)
@@ -429,11 +429,11 @@ _LIST_SQL = """SELECT s.session, s.start, s.end, s.num_cmds, s.remark,
     FROM sessions s WHERE s.remark{w} ORDER BY s.session DESC LIMIT 20"""
 
 def _list_sessions(db, cwd):
-    "Return recent sessions for `cwd`, falling back to git repo root prefix match."
+    "Return recent sessions for `cwd`, falling back to git repo root exact match."
     rows = db.execute(_LIST_SQL.format(w="=?"), (cwd,)).fetchall()
     if not rows:
         repo = _git_repo_root(cwd)
-        if repo: rows = db.execute(_LIST_SQL.format(w=" LIKE ?"), (repo + '%',)).fetchall()
+        if repo and repo != cwd: rows = db.execute(_LIST_SQL.format(w="=?"), (repo,)).fetchall()
     return rows
 
 def _fmt_session(sid, start, ncmds, last_prompt, max_prompt=60):
@@ -818,7 +818,7 @@ class IPyAIExtension:
     def run_prompt(self, prompt: str): return self.shell.loop_runner(self._run_prompt(prompt))
 
 
-@patch(once=True)
+@patch()
 async def run_cell_magic(self:InteractiveShell, magic_name, line, cell):
     result = self._orig_run_cell_magic(magic_name, line, cell)
     return await result if inspect.iscoroutine(result) else result
