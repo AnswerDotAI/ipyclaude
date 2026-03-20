@@ -1,4 +1,4 @@
-import asyncio,inspect,io,json,os,sqlite3
+import asyncio,inspect,io,json,os,sqlite3,sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -146,8 +146,7 @@ async def _chunks(*items):
 def run_stream(*items, **kwargs): return asyncio.run(astream_to_stdout(_chunks(*items), formatter_cls=DummyAsyncFormatter, **kwargs))
 
 
-def _strip_ids(nb):
-    return {**nb, "cells": [{k:v for k,v in c.items() if k != "id"} for c in nb.get("cells", [])]}
+def _strip_ids(nb): return {**nb, "cells": [{k:v for k,v in c.items() if k != "id"} for c in nb.get("cells", [])]}
 
 
 def mk_ext(load=True, **kwargs):
@@ -284,6 +283,21 @@ def test_run_prompt_suppresses_ipython_output_history_while_streaming(monkeypatc
 
     assert seen == [True]
     assert shell.display_pub._is_publishing is False
+
+
+def test_run_prompt_stores_cleaned_response_for_output_history(monkeypatch):
+    shell,ext = mk_ext(load=False)
+    # Simulate ipythonng extension
+    ng = SimpleNamespace(_pty_output=None)
+    shell._ipythonng_extension = ng
+
+    async def _fake_astream_to_stdout(stream, **kwargs): return "🧠🧠🧠\n\nHello world"
+    monkeypatch.setattr(core, "AsyncChat", DummyAsyncChat)
+    monkeypatch.setattr(core, "astream_to_stdout", _fake_astream_to_stdout)
+
+    ext.run_prompt("test")
+
+    assert ng._pty_output == "Hello world"
 
 
 def test_unexpected_prompt_table_schema_is_recreated():
@@ -535,11 +549,9 @@ def test_history_context_uses_lines_since_last_prompt_only():
 
 def test_startup_replays_code_and_restores_prompts():
     startup_path = core.STARTUP_PATH
-    cells = [
-        dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
-        dict(cell_type="markdown", source="hello", metadata=dict(ipyai=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
-        dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None),
-    ]
+    cells = [dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
+             dict(cell_type="markdown", source="hello", metadata=dict(ipyai=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
+             dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None)]
     startup_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)))
     shell = DummyShell()
     shell.execution_count = 1
@@ -615,8 +627,7 @@ def test_parse_skill(tmp_path):
     assert s == dict(name="my-skill", path=str(d), description="Does things.", tools=[])
 
 
-def test_parse_skill_missing_file(tmp_path):
-    assert _parse_skill(tmp_path / "nope") is None
+def test_parse_skill_missing_file(tmp_path): assert _parse_skill(tmp_path / "nope") is None
 
 
 def test_parse_skill_missing_name(tmp_path):
@@ -648,8 +659,7 @@ def test_discover_skills_deduplicates(tmp_path):
     assert sum(s["name"] == "only-once" for s in skills) == 1
 
 
-def test_skills_xml_empty():
-    assert _skills_xml([]) == ""
+def test_skills_xml_empty(): assert _skills_xml([]) == ""
 
 
 def test_skills_xml_formats_correctly():
@@ -725,8 +735,7 @@ def test_allowed_tools_from_frontmatter():
     text = "---\nallowed-tools: foo bar\n---\nbody"
     assert _allowed_tools(text) == {"foo", "bar"}
 
-def test_allowed_tools_from_backtick_refs():
-    assert _allowed_tools("use &`mytool` here") == {"mytool"}
+def test_allowed_tools_from_backtick_refs(): assert _allowed_tools("use &`mytool` here") == {"mytool"}
 
 def test_allowed_tools_combined():
     text = "---\nallowed-tools: foo\n---\nuse &`bar` here"
@@ -739,20 +748,18 @@ def test_skill_allowed_tools(tmp_path):
     s = _parse_skill(d)
     assert set(s["tools"]) == {"analyze", "fmt"}
 
+def _mk_tool_response(fn, result_text):
+    return (f"<details class='tool-usage-details'>\n<summary>{fn}</summary>\n"
+            f"```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"{fn}\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>")
+
 def test_tool_results_with_allowed_tools():
-    result_text = "---\\nallowed-tools: helper\\n---\\nbody"
-    response = f"<details class='tool-usage-details'>\n<summary>load_skill(path=x)</summary>\n```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"load_skill\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>"
-    assert "helper" in _tool_results(response)
+    assert "helper" in _tool_results(_mk_tool_response("load_skill", "---\\nallowed-tools: helper\\n---\\nbody"))
 
 def test_tool_results_with_eval_true():
-    result_text = "---\\neval: true\\n---\\nuse &`compute`"
-    response = f"<details class='tool-usage-details'>\n<summary>myfn()</summary>\n```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"myfn\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>"
-    assert "compute" in _tool_results(response)
+    assert "compute" in _tool_results(_mk_tool_response("myfn", "---\\neval: true\\n---\\nuse &`compute`"))
 
 def test_tool_results_without_qualifying_frontmatter():
-    result_text = "---\\nname: x\\n---\\nuse &`compute`"
-    response = f"<details class='tool-usage-details'>\n<summary>myfn()</summary>\n```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"myfn\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>"
-    assert _tool_results(response) == set()
+    assert _tool_results(_mk_tool_response("myfn", "---\\nname: x\\n---\\nuse &`compute`")) == set()
 
 def test_tool_refs_includes_skills_and_notes():
     skills = [dict(name="s", path="/s", description="", tools=["analyze"])]
@@ -773,16 +780,9 @@ def test_note_tool_refs_in_resolve(dummy_ai):
     assert any("helper" in str(t) for t in (chat.kwargs.get("tools") or []))
 
 
-def test_strip_thinking_shows_brains_while_thinking():
-    assert _strip_thinking("🧠🧠🧠") == "🧠🧠🧠"
-
-
-def test_strip_thinking_removes_brains_once_content_arrives():
-    assert _strip_thinking("🧠🧠🧠\n\nHello world") == "Hello world"
-
-
-def test_strip_thinking_handles_no_brains():
-    assert _strip_thinking("Hello world") == "Hello world"
+def test_strip_thinking_shows_brains_while_thinking(): assert _strip_thinking("🧠🧠🧠") == "🧠🧠🧠"
+def test_strip_thinking_removes_brains_once_content_arrives(): assert _strip_thinking("🧠🧠🧠\n\nHello world") == "Hello world"
+def test_strip_thinking_handles_no_brains(): assert _strip_thinking("Hello world") == "Hello world"
 
 
 def test_live_stream_strips_thinking_from_display():
@@ -884,8 +884,7 @@ def test_resume_session_not_found():
     shell = DummyShell()
     shell.history_manager.db = db
     shell.history_manager.session_number = 1
-    with pytest.raises(ValueError, match="Session 99 not found"):
-        resume_session(shell, 99)
+    with pytest.raises(ValueError, match="Session 99 not found"): resume_session(shell, 99)
 
 def test_store_cwd_in_remark(dummy_ai):
     shell,ext = mk_ext()
@@ -893,8 +892,7 @@ def test_store_cwd_in_remark(dummy_ai):
     hm = shell.history_manager
     hm.db.execute("CREATE TABLE IF NOT EXISTS sessions (session INTEGER PRIMARY KEY, start TEXT, end TEXT, num_cmds INTEGER, remark TEXT)")
     hm.db.execute("INSERT INTO sessions VALUES (?, ?, NULL, NULL, '')", (hm.session_number, "2025-01-01"))
-    with hm.db:
-        hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
+    with hm.db: hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
     row = hm.db.execute("SELECT remark FROM sessions WHERE session=?", (hm.session_number,)).fetchone()
     assert row[0] == os.getcwd()
 
@@ -915,3 +913,41 @@ def test_handle_line_sessions(dummy_ai):
     out = buf.getvalue()
     assert "1" in out
     assert "hello world" in out
+
+
+def test_e2e_ipyai_session(tmp_path):
+    "E2E: drive ipyai interactively via pexpect — prompt, response, session lifecycle."
+    import pexpect
+    hist_file = str(tmp_path / "hist.sqlite")
+    env = {k: v for k, v in os.environ.items() if k != 'IPYTHONNG_FLAGS'}
+    env['XDG_CONFIG_HOME'] = str(tmp_path / "config")
+    env['IPYTHON_DIR'] = str(tmp_path / "ipython")
+
+    args = ['-m', 'IPython', '--ext', 'ipyai', f'--HistoryManager.hist_file={hist_file}',
+            '--TerminalIPythonApp.display_banner=False', '--colors=NoColor']
+    child = pexpect.spawn(sys.executable, args, env=env, timeout=60, encoding='utf-8')
+
+    def wait_prompt(n): child.expect(f'In \\[{n}\\]')
+
+    # Wait for first prompt
+    wait_prompt(1)
+
+    # Run some Python code
+    child.sendline('x = 42')
+    wait_prompt(2)
+
+    # Send an AI prompt via the . prefix
+    child.sendline(".respond 'ok' if you receive this")
+    child.expect('ok', timeout=60)
+
+    # Wait for next prompt (AI response finished)
+    wait_prompt(3)
+
+    # Check %ipyai sessions lists something
+    child.sendline('%ipyai sessions')
+    wait_prompt(4)
+
+    # Exit and check for resume message
+    child.sendline('exit()')
+    child.expect('To resume')
+    child.expect(pexpect.EOF)

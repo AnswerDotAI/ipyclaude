@@ -91,8 +91,7 @@ def _extract_code_blocks(text):
     from mistletoe import Document
     from mistletoe.block_token import CodeFence
     return [child.children[0].content.strip() for child in Document(text).children
-            if isinstance(child, CodeFence) and child.language in ('python', 'py')
-            and child.children and child.children[0].content.strip()]
+            if isinstance(child, CodeFence) and child.language in ('python', 'py') and child.children and child.children[0].content.strip()]
 
 
 def is_dot_prompt(lines: list[str]) -> bool: return bool(lines) and lines[0].startswith(".")
@@ -223,7 +222,7 @@ async def _astream_to_live_markdown(chunks, out, code_theme: str, console_cls=Co
     console = console_cls(file=out, force_terminal=True)
     text = first
     with live_cls(_markdown_renderable(_display_text(text), code_theme, markdown_cls), console=console,
-        auto_refresh=False, transient=False) as live:
+        auto_refresh=False, transient=False, redirect_stdout=False, redirect_stderr=False) as live:
         async for chunk in chunks:
             if not chunk: continue
             text += chunk
@@ -319,9 +318,8 @@ def _event_to_cell(o):
         return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0))),
                     outputs=[], execution_count=None)
     if o.get("kind") == "prompt":
-        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""),
-                    metadata=dict(ipyai=dict(kind="prompt", line=o.get("line", 0),
-                                             history_line=o.get("history_line", 0), prompt=o.get("prompt", ""))))
+        meta = dict(kind="prompt", line=o.get("line", 0), history_line=o.get("history_line", 0), prompt=o.get("prompt", ""))
+        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""), metadata=dict(ipyai=meta))
 
 
 def _cell_to_event(cell):
@@ -411,12 +409,10 @@ def load_skill(path:str):  # path: Path to the skill directory
     return FullResponse(text)
 
 
-if not hasattr(inspect, "_orig_getfile"):
-    @patch_to(inspect, nm="getfile")
-    def _getfile(obj): return str(inspect._orig_getfile(obj))
+@patch_to(inspect, nm="getfile", once=True)
+def _getfile(obj): return str(inspect._orig_getfile(obj))
 
-
-@patch
+@patch(once=True)
 def structured_traceback(self:SyntaxTB, etype, evalue, etb, tb_offset=None, context=5):
     if hasattr(evalue, "msg") and not isinstance(evalue.msg, str): evalue.msg = str(evalue.msg)
     return self._orig_structured_traceback(etype, evalue, etb, tb_offset=tb_offset, context=context)
@@ -567,8 +563,7 @@ class IPyAIExtension:
 
     def note_strings(self, start, stop):
         "Return note string values from code history in range."
-        return [_note_str(src) for _,_,pair in self.code_history(start, stop)
-                if (src := pair[0]) and _is_note(src)]
+        return [_note_str(src) for _,_,pair in self.code_history(start, stop) if (src := pair[0]) and _is_note(src)]
 
     def resolve_tools(self, prompt, hist, skills=None, notes=None, responses=None):
         ns = self.shell.user_ns
@@ -786,10 +781,9 @@ class IPyAIExtension:
         cmd,_,arg = line.partition(" ")
         if arg:
             clean = arg.strip()
-            vals = dict(model=lambda: clean, completion_model=lambda: clean or DEFAULT_COMPLETION_MODEL,
-                think=lambda: _validate_level("think", clean, self.think),
-                search=lambda: _validate_level("search", clean, self.search), code_theme=lambda: clean or DEFAULT_CODE_THEME,
-                log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
+            vals = dict(model=lambda: clean, completion_model=lambda: clean or DEFAULT_COMPLETION_MODEL, code_theme=lambda: clean or DEFAULT_CODE_THEME,
+                        think=lambda: _validate_level("think", clean, self.think), search=lambda: _validate_level("search", clean, self.search),
+                        log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
         return self.run_prompt(line)
 
@@ -815,6 +809,8 @@ class IPyAIExtension:
         stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
         with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, code_theme=self.code_theme)
         self.shell.user_ns[LAST_RESPONSE] = text
+        ng = getattr(self.shell, '_ipythonng_extension', None)
+        if ng: ng._pty_output = _strip_thinking(text)
         self.log_exact_exchange(full_prompt, text)
         self.save_prompt(prompt, text, history_line)
         return None
@@ -822,7 +818,7 @@ class IPyAIExtension:
     def run_prompt(self, prompt: str): return self.shell.loop_runner(self._run_prompt(prompt))
 
 
-@patch
+@patch(once=True)
 async def run_cell_magic(self:InteractiveShell, magic_name, line, cell):
     result = self._orig_run_cell_magic(magic_name, line, cell)
     return await result if inspect.iscoroutine(result) else result
@@ -838,20 +834,20 @@ def create_extension(shell=None, resume=None, **kwargs):
     if resume is not None:
         if resume == -1:
             rows = _list_sessions(shell.history_manager.db, os.getcwd())
-            if rows:
-                chosen = _pick_session(rows)
-                if chosen: resume_session(shell, chosen)
+            if rows and (chosen := _pick_session(rows)): resume_session(shell, chosen)
             else: print("No sessions found for this directory.")
         else: resume_session(shell, resume)
     ext = getattr(shell, EXTENSION_ATTR, None)
     if ext is None: ext = IPyAIExtension(shell=shell, **kwargs)
     if not ext.loaded: ext.load()
-    shell.input_transformer_manager.line_transforms.append(_await_cell_magic)
+    lts = shell.input_transformer_manager.line_transforms
+    if not any(getattr(f, '__name__', None) == '_await_cell_magic' for f in lts): lts.append(_await_cell_magic)
     hm = shell.history_manager
-    with hm.db:
-        hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
-    sid = hm.session_number
-    atexit.register(lambda: print(f"\nTo resume: ipythonng -r {sid}"))
+    with hm.db: hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
+    if not getattr(shell, '_ipyai_atexit', False):
+        sid = hm.session_number
+        atexit.register(lambda: print(f"\nTo resume: ipyai -r {sid}"))
+        shell._ipyai_atexit = True
     return ext
 
 

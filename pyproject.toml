@@ -10,21 +10,22 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "Jeremy Howard", email = "info@answer.ai"}]
-dependencies = ["fastcore", "ipython>=9", "lisette>=0.0.47", "rich"]
+dependencies = ["fastcore", "ipython>=9", "lisette>=0.0.47", "rich", "mistletoe", "ipythonng"]
+
+[project.scripts]
+ipyai = "ipyai.cli:main"
 
 [project.urls]
 Source = "https://github.com/answerdotai/ipyai"
 
 [project.optional-dependencies]
-dev = ["build>=1.0.0", "fastship>=0.0.6", "ipythonng", "pytest", "twine>=5.0.0"]
+dev = ["build>=1.0.0", "fastship>=0.0.6", "pytest", "twine>=5.0.0"]
 
 [tool.setuptools.dynamic]
 version = {attr = "ipyai.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["ipyai", "ipyai.*"]
+include = ["ipyai*"]
 
 [tool.fastship]
-branch = "main"
-changelog_file = "CHANGELOG.md"
 

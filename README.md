@@ -10,7 +10,24 @@ It is aimed at terminal IPython, not notebook frontends.
 pip install ipyai
 ```
 
-## Load
+## CLI
+
+`ipyai` provides a standalone command that launches IPython with `ipyai` and `ipythonng` extensions pre-loaded and output history enabled:
+
+```bash
+ipyai
+```
+
+Resume a previous session:
+
+```bash
+ipyai -r        # interactive session picker
+ipyai -r 43     # resume session 43 directly
+```
+
+On exit, `ipyai` prints the session ID so you can resume later.
+
+## Load As Extension
 
 ```python
 %load_ext ipyai
@@ -100,6 +117,7 @@ Notes appear in the AI context as `<note>` blocks rather than `<code>` blocks. W
 - `%ipyai model ...` / `completion_model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
 - `%ipyai save` — save the current session (code, notes, and AI history) to `startup.ipynb`
 - `%ipyai reset` — clear AI prompt history for the current session
+- `%ipyai sessions` — list resumable sessions for the current directory (falls back to git repo root)
 
 ## Tools
 
@@ -131,6 +149,17 @@ All discovered tools that exist as callables in the IPython namespace are includ
 Each skill is a directory containing a `SKILL.md` file with YAML frontmatter (`name`, `description`) and markdown instructions. Skills can also declare `allowed-tools` in their frontmatter (space-delimited list of tool names) to pre-approve tools without requiring explicit `&`name`` mentions in prompts.
 
 At the start of each conversation, the AI sees a list of available skill names and descriptions. When a request matches a skill, the AI calls the `load_skill` tool to read its full instructions before responding.
+
+Python code blocks in skills that start with `#| eval: true` (nbdev/quarto syntax) are executed in the IPython namespace when the skill is loaded, allowing skills to define tool functions:
+
+````markdown
+```python
+#| eval: true
+def my_tool(x):
+    "A skill-provided tool"
+    return x * 2
+```
+````
 
 See the [Agent Skills specification](https://agentskills.io/specification.md) for the full format.
 

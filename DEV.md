@@ -50,14 +50,20 @@ Implemented:
 - syntax highlighting disabled for `.` prompts and `%%ipyai` cells (patches `IPythonPTLexer` at class level)
 - XDG-backed config, startup, and system prompt files
 - optional exact raw prompt/response logging
-- minimal IPython compatibility patches for `SyntaxTB` and `inspect.getfile`
+- skill eval blocks: `#| eval: true` python code blocks in skills are executed via `shell.run_cell` when loaded
+- per-directory session persistence: CWD stored in IPython `sessions.remark`, session resume via `resume_session()`
+- interactive session picker via `prompt_toolkit.radiolist_dialog` for `ipyai -r`
+- `%ipyai sessions` command listing resumable sessions with last prompt preview
+- `ipyai` CLI entry point (console script) launching IPython with ipythonng + ipyai + output history
+- minimal IPython compatibility patches for `SyntaxTB` and `inspect.getfile` (guarded with `once=True` to coexist with ipykernel_helper)
 
 ## File Map
 
-- [ipyai/core.py](ipyai/core.py): extension logic, XDG path globals, config loading, prompt/history building, tool resolution, skill discovery, async streaming, Rich rendering, keybindings
+- [ipyai/core.py](ipyai/core.py): extension logic, XDG path globals, config loading, prompt/history building, tool resolution, skill discovery, session persistence/resume, async streaming, Rich rendering, keybindings
+- [ipyai/cli.py](ipyai/cli.py): `ipyai` console script entry point — parses flags via `ipythonng.cli.parse_flags`, launches IPython with extensions and output history
 - [ipyai/__init__.py](ipyai/__init__.py): package exports and version
-- [tests/test_core.py](tests/test_core.py): focused unit tests for transformation, history, config, tools, notes, skills, rendering, and thinking display
-- [pyproject.toml](pyproject.toml): packaging and fastship configuration
+- [tests/test_core.py](tests/test_core.py): focused unit tests for transformation, history, config, tools, notes, skills, sessions, rendering, and thinking display
+- [pyproject.toml](pyproject.toml): packaging, console script (`ipyai`), and fastship configuration
 - [.agents/skills/](/.agents/skills/): project-local Agent Skills
 
 ## Prompt History And Context
@@ -104,14 +110,15 @@ The `<context>` block contains all non-`ipyai` code run since the previous AI pr
 
 The extension lifecycle is:
 
-1. `%load_ext ipyai` calls `load_ipython_extension`, which delegates to `create_extension`.
-2. `IPyAIExtension.__init__` loads config, system prompt, discovers skills, and loads the startup file.
-3. `IPyAIExtension.load()` registers `%ipyai` / `%%ipyai`, inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`, registers keybindings, and applies `startup.ipynb` if the session is still fresh.
+1. `%load_ext ipyai` calls `load_ipython_extension`, which parses `IPYTHONNG_FLAGS` and delegates to `create_extension`.
+2. `create_extension` ensures the `ai_prompts` table exists, optionally resumes a session (or shows the interactive picker), creates the extension, stores CWD in `sessions.remark`, and registers the atexit handler.
+3. `IPyAIExtension.__init__` loads config, system prompt, discovers skills, and loads the startup file.
+4. `IPyAIExtension.load()` registers `%ipyai` / `%%ipyai`, inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`, registers keybindings, and applies `startup.ipynb` if the session is still fresh.
 4. Any cell whose first character is `.` is rewritten by `transform_dots()` into `get_ipython().run_cell_magic('ipyai', '', prompt)`.
 5. `AIMagics.ipyai()` routes line input to `handle_line()` and cell input directly to the `_run_prompt()` coroutine (returned to the async `run_cell_magic` patch for awaiting).
 6. `_run_prompt()` reconstructs conversation history, resolves tools, adds skills tools/system prompt if skills were discovered, runs `lisette.AsyncChat`, streams the response, optionally writes an exact log entry, and stores the full response.
 
-At import time, `ipyai` also applies two small global IPython bugfixes borrowed from `ipykernel_helper`:
+At import time, `ipyai` also applies two small global IPython bugfixes (shared with `ipykernel_helper`, guarded with `once=True` so only the first loader applies them):
 
 - `SyntaxTB.structured_traceback` coerces non-string `evalue.msg` values to `str`
 - `inspect.getfile` is wrapped to always return a string
@@ -182,6 +189,21 @@ On a fresh load:
 - `execution_count` is advanced for restored prompt events so later saves preserve ordering
 
 Legacy `startup.json` files (pre-notebook format) are still supported for loading.
+
+## Session Persistence And Resume
+
+`ipyai` stores the working directory in IPython's `sessions.remark` column (an unused TEXT field) at extension load time. This enables per-directory session listing and resume.
+
+Key functions:
+
+- `_list_sessions(db, cwd)` — queries sessions for the given directory, falls back to git repo root prefix match; includes the last AI prompt per session via a subquery on `ai_prompts`
+- `_fmt_session()` — formats a session row for display (shared by `%ipyai sessions` and the interactive picker)
+- `_pick_session(rows)` — interactive `radiolist_dialog` picker from prompt_toolkit
+- `resume_session(shell, session_id)` — deletes the fresh session row, restores `session_number` and `execution_count`, pads `input_hist_parsed`/`input_hist_raw`, reopens the old session (clears `end` timestamp)
+
+Resume is triggered by `IPYTHONNG_FLAGS` env var (set by the `ipyai` CLI when `-r` is passed). The `_ng_parser` (argparse) parses `-r <id>` or bare `-r` (const=-1 for interactive picker).
+
+On exit, an `atexit` handler prints the session ID for easy resume.
 
 ## Skills
 
@@ -295,6 +317,14 @@ When `log_exact` is enabled, the log file contains the exact fully-expanded prom
 
 ## Tests
 
+To run ipyai in isolation (no user config, startup, or history), set these environment variables:
+
+- `XDG_CONFIG_HOME` — redirects ipyai's config files (`config.json`, `sysp.txt`, `startup.ipynb`)
+- `IPYTHON_DIR` — redirects IPython's profile directory (prevents loading user `ipython_config.py` and startup scripts)
+- `--HistoryManager.hist_file=<path>` — isolates the history database
+
+The e2e test uses all three to create a fully isolated session via pexpect.
+
 The test suite uses dummy shell, history, chat, formatter, console, and markdown objects.
 
 Coverage currently focuses on:
@@ -311,8 +341,9 @@ Coverage currently focuses on:
 - raw exact logging
 - Rich live markdown rendering
 - thinking emoji stripping
-- skill discovery, parsing, XML generation, and `load_skill`
+- skill discovery, parsing, XML generation, `load_skill`, and eval blocks
 - skills integration in `_run_prompt`
+- session persistence: CWD in remark, list sessions, resume session
 - code block extraction
 
 When changing behavior in [ipyai/core.py](ipyai/core.py), update or add the narrowest possible test in [tests/test_core.py](tests/test_core.py).
@@ -362,6 +393,10 @@ If you want to change AI inline completion:
 If you want to change syntax highlighting:
 
 - edit `_patch_lexer()`
+
+If you want to change session persistence or resume:
+
+- edit `_list_sessions()`, `_fmt_session()`, `_pick_session()`, `resume_session()`, the `sessions` case in `handle_line()`, and the session handling in `create_extension()`
 
 ## Working Assumptions
 
