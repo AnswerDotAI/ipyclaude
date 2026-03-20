@@ -10,7 +10,7 @@ import ipyai.core as core
 from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
     IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_dots,
-    _parse_skill, _parse_frontmatter, _allowed_tools, _tool_results, _tool_refs,
+    _parse_skill, _allowed_tools, _tool_results, _tool_refs,
     _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, _eval_code_blocks, load_skill,
     _git_repo_root, _list_sessions, resume_session)
 
@@ -721,14 +721,16 @@ def test_run_prompt_includes_skills_tool_and_system_prompt(dummy_ai, tmp_path, m
     assert "test-skill" in chat.kwargs["sp"]
 
 
-def test_parse_frontmatter():
-    fm, body = _parse_frontmatter("---\nname: x\n---\nbody")
+def test_frontmatter():
+    from fastcore.xtras import frontmatter
+    fm, body = frontmatter("---\nname: x\n---\nbody")
     assert fm == {"name": "x"}
     assert body == "body"
 
-def test_parse_frontmatter_none():
-    fm, body = _parse_frontmatter("no frontmatter")
-    assert fm is None
+def test_frontmatter_none():
+    from fastcore.xtras import frontmatter
+    fm, body = frontmatter("no frontmatter")
+    assert fm == {}
     assert body == "no frontmatter"
 
 def test_allowed_tools_from_frontmatter():

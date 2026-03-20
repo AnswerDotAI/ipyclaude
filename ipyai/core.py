@@ -1,4 +1,4 @@
-import argparse,ast,atexit,html,inspect,json,os,re,sqlite3,sys,uuid,yaml
+import argparse,ast,atexit,html,inspect,json,os,re,sqlite3,sys,uuid
 from contextlib import contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
@@ -6,6 +6,7 @@ from typing import Callable
 
 from fastcore.basics import patch,patch_to
 from fastcore.xdg import xdg_config_home
+from fastcore.xtras import frontmatter
 from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, line_cell_magic, magics_class
@@ -138,19 +139,9 @@ def _note_str(source): return ast.parse(source).body[0].value.value
 def _tool_names(text: str) -> set[str]: return set(_tool_re.findall(text or ""))
 
 
-def _parse_frontmatter(text):
-    "Return (frontmatter_dict, body) or (None, text)."
-    if not text or not text.startswith('---'): return None, text
-    end = text.find('\n---', 3)
-    if end == -1: return None, text
-    try: fm = yaml.safe_load(text[3:end])
-    except Exception: return None, text
-    return (fm, text[end+4:].lstrip('\n')) if isinstance(fm, dict) else (None, text)
-
-
 def _allowed_tools(text):
     "Extract tool names from frontmatter allowed-tools and &`tool` mentions."
-    fm, body = _parse_frontmatter(text)
+    fm, body = frontmatter(text)
     names = _tool_names(text)
     if fm:
         at = fm.get('allowed-tools', '')
@@ -164,7 +155,7 @@ def _tool_results(response):
     for m in _tool_block_re.finditer(response or ""):
         try: result = str(json.loads(m.group(2)).get("result", ""))
         except Exception: continue
-        fm, _ = _parse_frontmatter(result)
+        fm, _ = frontmatter(result)
         if fm and (fm.get('allowed-tools') or fm.get('eval')): names |= _allowed_tools(result)
     return names
 
@@ -356,7 +347,7 @@ def _parse_skill(path):
     skill_md = Path(path) / "SKILL.md"
     if not skill_md.exists(): return None
     text = skill_md.read_text()
-    fm, body = _parse_frontmatter(text)
+    fm, body = frontmatter(text)
     if not fm: return None
     name = fm.get('name', '')
     if not name: return None
