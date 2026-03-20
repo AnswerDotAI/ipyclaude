@@ -2,6 +2,13 @@
 
 <!-- do not remove -->
 
+## 0.0.7
+
+### Bugs Squashed
+
+- use exact match for git repo root session fallback and remove `once=True` from patches ([#19](https://github.com/AnswerDotAI/ipyai/issues/19))
+
+
 ## 0.0.6
 
 ### New Features
