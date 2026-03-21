@@ -11,6 +11,8 @@ from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
     IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_dots,
     _parse_skill, _allowed_tools, _tool_results, _tool_refs,
+    _var_names, _var_refs, _format_var_xml,
+    _shell_names, _shell_refs, _run_shell_refs,
     _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, _eval_code_blocks, load_skill,
     _git_repo_root, _list_sessions, resume_session)
 
@@ -456,10 +458,11 @@ def test_tools_resolve_from_ampersand_backticks():
     shell.user_ns["demo"] = demo
     ext = IPyAIExtension(shell=shell).load()
 
-    tools = ext.resolve_tools("please call &`demo` now", [])
+    tools, bad = ext.resolve_tools("please call &`demo` now", [])
     assert len(tools) == 1
     assert tools[0]["type"] == "function"
     assert tools[0]["function"]["name"] == "demo"
+    assert bad == []
 
 
 def test_tools_resolve_callable_objects_by_namespace_name():
@@ -472,10 +475,11 @@ def test_tools_resolve_callable_objects_by_namespace_name():
     shell.user_ns["demo"] = Demo()
     ext = IPyAIExtension(shell=shell).load()
 
-    tools = ext.resolve_tools("please call &`demo` now", [])
+    tools, bad = ext.resolve_tools("please call &`demo` now", [])
     assert len(tools) == 1
     assert tools[0]["type"] == "function"
     assert tools[0]["function"]["name"] == "demo"
+    assert bad == []
 
 
 def test_context_xml_includes_code_and_outputs_since_last_prompt():
@@ -620,7 +624,7 @@ def _mk_skill(root, name, description="A test skill."):
 def test_parse_skill(tmp_path):
     d = _mk_skill(tmp_path, "my-skill", "Does things.")
     s = _parse_skill(d)
-    assert s == dict(name="my-skill", path=str(d), description="Does things.", tools=[])
+    assert s == dict(name="my-skill", path=str(d), description="Does things.", tools=[], vars=[], shell_cmds=[])
 
 
 def test_parse_skill_missing_file(tmp_path): assert _parse_skill(tmp_path / "nope") is None
@@ -776,6 +780,164 @@ def test_note_tool_refs_in_resolve(dummy_ai):
     ext.run_prompt("do something")
     chat = dummy_ai.instances[-1]
     assert any("helper" in str(t) for t in (chat.kwargs.get("tools") or []))
+
+
+## Prompt variable tests ($`var`)
+
+def test_var_names_extracts_dollar_backtick():
+    assert _var_names("use $`x` and $`y`") == {"x", "y"}
+
+def test_var_names_empty_on_no_match():
+    assert _var_names("no vars here") == set()
+    assert _var_names("") == set()
+
+def test_var_refs_from_prompt_and_history():
+    refs = _var_refs("use $`a`", [dict(prompt="use $`b`")])
+    assert refs == {"a", "b"}
+
+def test_var_refs_from_skills():
+    skills = [dict(name="s", path="/s", description="", tools=[], vars=["x"])]
+    refs = _var_refs("use $`a`", [], skills=skills)
+    assert refs == {"a", "x"}
+
+def test_var_refs_from_notes():
+    refs = _var_refs("", [], notes=["---\nexposed-vars: x y\n---\nuse $`z`"])
+    assert refs == {"x", "y", "z"}
+
+def test_format_var_xml():
+    ns = dict(x=42, name="hello")
+    xml = _format_var_xml({"x", "name"}, ns)
+    assert '<variable name="x" type="int">42</variable>' in xml
+    assert '<variable name="name" type="str">hello</variable>' in xml
+
+def test_format_var_xml_missing_returns_empty():
+    assert _format_var_xml({"missing"}, {}) == ""
+
+def test_resolve_tools_missing_tool_not_raised(dummy_ai):
+    shell,ext = mk_ext()
+    ext.run_prompt("call &`nonexistent`")
+    chat = dummy_ai.instances[-1]
+    assert '<note>' in chat.calls[0][0]
+    assert 'nonexistent' in chat.calls[0][0]
+
+def test_resolve_tools_noncallable_noted(dummy_ai):
+    shell,ext = mk_ext()
+    shell.user_ns["x"] = 42
+    ext.run_prompt("call &`x`")
+    chat = dummy_ai.instances[-1]
+    assert '<note>' in chat.calls[0][0]
+    assert 'x' in chat.calls[0][0]
+
+def test_var_in_prompt_adds_variable_xml(dummy_ai):
+    shell,ext = mk_ext()
+    shell.user_ns["myval"] = 99
+    ext.run_prompt("check $`myval`")
+    chat = dummy_ai.instances[-1]
+    prompt = chat.calls[0][0]
+    assert '<variable name="myval" type="int">99</variable>' in prompt
+
+def test_missing_var_in_prompt_adds_note(dummy_ai):
+    shell,ext = mk_ext()
+    ext.run_prompt("check $`missing_var`")
+    chat = dummy_ai.instances[-1]
+    prompt = chat.calls[0][0]
+    assert '<note>' in prompt
+    assert 'missing_var' in prompt
+
+def test_mixed_missing_tools_and_vars_in_note(dummy_ai):
+    shell,ext = mk_ext()
+    ext.run_prompt("use &`bad_tool` and $`bad_var`")
+    chat = dummy_ai.instances[-1]
+    prompt = chat.calls[0][0]
+    assert 'bad_tool' in prompt
+    assert 'bad_var' in prompt
+
+def test_var_from_history_included(dummy_ai):
+    shell,ext = mk_ext()
+    shell.user_ns["x"] = 10
+    ext.run_prompt("first prompt with $`x`")
+    ext.run_prompt("second prompt")
+    chat = dummy_ai.instances[-1]
+    prompt = chat.calls[0][0]
+    assert '<variable name="x" type="int">10</variable>' in prompt
+
+def test_skill_vars_parsed(tmp_path):
+    d = tmp_path / "my-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\nname: my-skill\ndescription: x\nexposed-vars: data\n---\nuse $`count`\n")
+    s = _parse_skill(d)
+    assert set(s["vars"]) == {"data", "count"}
+
+def test_skill_vars_in_prompt(dummy_ai, tmp_path, monkeypatch):
+    shell,ext = mk_ext()
+    shell.user_ns["data"] = [1, 2, 3]
+    d = tmp_path / "my-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\nname: my-skill\ndescription: x\nexposed-vars: data\n---\nbody")
+    monkeypatch.setattr(core, "_discover_skills", lambda: [_parse_skill(d)])
+    shell2, ext2 = mk_ext()
+    shell2.user_ns["data"] = [1, 2, 3]
+    ext2.run_prompt("do something")
+    chat = dummy_ai.instances[-1]
+    prompt = chat.calls[0][0]
+    assert '<variable name="data" type="list">[1, 2, 3]</variable>' in prompt
+
+
+## Shell ref tests (!`cmd`)
+
+def test_shell_names_extracts_bang_backtick():
+    assert _shell_names("check !`uname -a` and !`ls`") == {"uname -a", "ls"}
+
+def test_shell_names_empty_on_no_match():
+    assert _shell_names("no shell here") == set()
+
+def test_shell_refs_from_prompt_and_history():
+    refs = _shell_refs("run !`echo hi`", [dict(prompt="run !`date`")])
+    assert refs == {"echo hi", "date"}
+
+def test_shell_refs_from_skills():
+    skills = [dict(name="s", path="/s", description="", tools=[], vars=[], shell_cmds=["git status"])]
+    refs = _shell_refs("", [], skills=skills)
+    assert refs == {"git status"}
+
+def test_shell_refs_from_notes():
+    refs = _shell_refs("", [], notes=["---\nshell-cmds: git status\n---\nrun !`ls`"])
+    assert refs == {"git status", "ls"}
+
+def test_run_shell_refs_runs_commands():
+    xml = _run_shell_refs({"echo hello"})
+    assert '<shell cmd="echo hello">' in xml
+    assert 'hello' in xml
+
+def test_run_shell_refs_empty_for_no_cmds():
+    assert _run_shell_refs(set()) == ""
+
+def test_shell_in_prompt_adds_shell_xml(dummy_ai):
+    shell,ext = mk_ext()
+    ext.run_prompt("check !`echo test123`")
+    chat = dummy_ai.instances[-1]
+    prompt = chat.calls[0][0]
+    assert '<shell cmd="echo test123">' in prompt
+    assert 'test123' in prompt
+
+def test_shell_from_history_included(dummy_ai):
+    shell,ext = mk_ext()
+    ext.run_prompt("first with !`echo aaa`")
+    ext.run_prompt("second prompt")
+    chat = dummy_ai.instances[-1]
+    prompt = chat.calls[0][0]
+    assert '<shell cmd="echo aaa">' in prompt
+
+def test_skill_shell_cmds_parsed(tmp_path):
+    d = tmp_path / "my-skill"
+    d.mkdir()
+    (d / "SKILL.md").write_text("---\nname: my-skill\ndescription: x\nshell-cmds: git status\n---\nrun !`ls`\n")
+    s = _parse_skill(d)
+    assert set(s["shell_cmds"]) == {"git status", "ls"}
+
+def test_sysprompt_mentions_variables_and_shell():
+    assert '$`' in DEFAULT_SYSTEM_PROMPT
+    assert '!`' in DEFAULT_SYSTEM_PROMPT
 
 
 def test_strip_thinking_shows_brains_while_thinking(): assert _strip_thinking("🧠🧠🧠") == "🧠🧠🧠"

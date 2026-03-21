@@ -1,4 +1,4 @@
-import argparse,ast,atexit,html,inspect,json,os,re,sys,uuid
+import argparse,ast,atexit,inspect,json,os,re,sys,uuid
 from contextlib import contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
@@ -14,7 +14,13 @@ from IPython.core.ultratb import SyntaxTB
 from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse,contents
 from rich.console import Console
 from rich.live import Live
-from rich.markdown import Markdown
+from rich.markdown import Markdown, TableDataElement
+
+# Fix Rich bug: TableDataElement.on_text clobbers syntax-highlight spans
+def _tde_on_text(self, context, text):
+    if isinstance(text, str): self.content.append(text, context.current_style)
+    else: self.content.append_text(text)
+TableDataElement.on_text = _tde_on_text
 from toolslm.funccall import get_schema_nm
 from IPython.core.interactiveshell import InteractiveShell
 
@@ -39,7 +45,12 @@ Earlier user turns in the chat history may also contain their own `<context>` bl
 
 You can respond in Markdown. Your final visible output in terminal IPython will be rendered with Rich, so normal Markdown formatting, fenced code blocks, lists, and tables are appropriate when useful.
 
-When the user mentions `&`-backtick tool references such as `&`tool_name``, the corresponding callable from the active IPython namespace may be available to you as a tool. Use tools when they will materially improve correctness or completeness; otherwise answer directly.
+The user can attach context to their prompt using backtick references:
+- `&`name`` exposes a callable from the IPython namespace as a tool you can call
+- `$`name`` exposes a variable's current value, shown as `<variable name="..." type="...">value</variable>` above the user's request
+- `!`cmd`` runs a shell command and includes its output, shown as `<shell cmd="...">output</shell>` above the user's request
+
+Use tools when they will materially improve correctness or completeness; otherwise answer directly.
 
 If a `<skills>` section is appended to this system prompt, it lists available skills. When a user's request matches a skill description, call the `load_skill` tool with the skill's path to load its full instructions before responding.
 
@@ -83,6 +94,8 @@ prompt_from_lines astream_to_stdout transform_dots unload_ipython_extension""".s
 
 _prompt_template = """{context}<user-request>{prompt}</user-request>"""
 _tool_re = re.compile(r"&`(\w+)`")
+_var_re = re.compile(r"\$`(\w+)`")
+_shell_re = re.compile(r"!`([^`]+)`")
 _tool_block_re = re.compile(
     r"<details class='tool-usage-details'>\s*<summary>(.*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>", flags=re.DOTALL)
 _status_attrs = "model completion_model think search code_theme log_exact".split()
@@ -110,14 +123,8 @@ def transform_dots(lines: list[str], magic: str=MAGIC_NAME) -> list[str]:
     return [f"get_ipython().run_cell_magic({magic!r}, '', {prompt!r})\n"]
 
 
-def _xml_attr(o) -> str: return html.escape(str(o), quote=True)
-
-
-def _xml_text(o) -> str: return html.escape(str(o), quote=False)
-
-
 def _tag(name: str, content="", **attrs) -> str:
-    ats = "".join(f' {k}="{_xml_attr(v)}"' for k,v in attrs.items())
+    ats = "".join(f' {k}="{v}"' for k,v in attrs.items())
     return f"<{name}{ats}>{content}</{name}>"
 
 
@@ -169,6 +176,70 @@ def _tool_refs(prompt, hist, skills=None, notes=None, responses=None):
     for n in (notes or []): names |= _allowed_tools(n)
     for r in (responses or []): names |= _tool_results(r)
     return names
+
+
+def _var_names(text: str) -> set[str]: return set(_var_re.findall(text or ""))
+
+
+def _exposed_vars(text):
+    "Extract var names from frontmatter exposed-vars and $`var` mentions."
+    fm, body = frontmatter(text)
+    names = _var_names(text)
+    if fm:
+        ev = fm.get('exposed-vars', '')
+        if ev: names |= set(str(ev).split())
+    return names
+
+
+def _var_refs(prompt, hist, skills=None, notes=None, responses=None):
+    names = _var_names(prompt)
+    for o in hist: names |= _var_names(o["prompt"])
+    if skills:
+        for s in skills: names |= set(s.get("vars") or [])
+    for n in (notes or []): names |= _exposed_vars(n)
+    return names
+
+
+def _format_var_xml(names, ns):
+    parts = []
+    for n in sorted(names):
+        if n not in ns: continue
+        v = ns[n]
+        parts.append(f'<variable name="{n}" type="{type(v).__name__}">{str(v)}</variable>')
+    return "".join(parts)
+
+
+def _shell_names(text: str) -> set[str]: return set(_shell_re.findall(text or ""))
+
+
+def _shell_cmds(text):
+    "Extract shell commands from frontmatter shell-cmds and !`cmd` mentions."
+    fm, body = frontmatter(text)
+    names = _shell_names(text)
+    if fm:
+        sc = fm.get('shell-cmds', '')
+        if sc: names |= set(str(sc).split('\n')) if '\n' in str(sc) else {str(sc)}
+    return names
+
+
+def _shell_refs(prompt, hist, skills=None, notes=None):
+    names = _shell_names(prompt)
+    for o in hist: names |= _shell_names(o["prompt"])
+    if skills:
+        for s in skills: names |= set(s.get("shell_cmds") or [])
+    for n in (notes or []): names |= _shell_cmds(n)
+    return names
+
+
+def _run_shell_refs(cmds):
+    if not cmds: return ""
+    import subprocess
+    parts = []
+    for cmd in sorted(cmds):
+        try: out = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30).stdout.rstrip()
+        except Exception as e: out = f"Error: {e}"
+        parts.append(f'<shell cmd="{cmd}">{out}</shell>')
+    return "".join(parts)
 
 
 def _event_sort_key(o): return o.get("line", 0), 0 if o.get("kind") == "code" else 1
@@ -352,7 +423,9 @@ def _parse_skill(path):
     name = fm.get('name', '')
     if not name: return None
     tools = list(_allowed_tools(text))
-    return dict(name=name, path=str(path), description=fm.get('description', ''), tools=tools)
+    vars = list(_exposed_vars(text))
+    shell_cmds = list(_shell_cmds(text))
+    return dict(name=name, path=str(path), description=fm.get('description', ''), tools=tools, vars=vars, shell_cmds=shell_cmds)
 
 
 def _discover_skills(cwd=None):
@@ -379,7 +452,7 @@ def _skills_xml(skills):
     if not skills: return ""
     parts = ["The following skills are available. To activate a skill and read its full instructions, call the load_skill tool with its path."]
     for s in skills:
-        parts.append(f'<skill name="{_xml_attr(s["name"])}" path="{_xml_attr(s["path"])}">{_xml_text(s["description"])}</skill>')
+        parts.append(f'<skill name="{s["name"]}" path="{s["path"]}">{s["description"]}</skill>')
     return "\n" + _tag("skills", "\n".join(parts))
 
 
@@ -532,10 +605,10 @@ class IPyAIExtension:
         for _,line,pair in entries:
             source,output = pair
             if not source or _is_ipyai_input(source): continue
-            if _is_note(source): parts.append(_tag("note", _xml_text(_note_str(source))))
+            if _is_note(source): parts.append(_tag("note", _note_str(source)))
             else:
-                parts.append(_tag("code", _xml_text(source)))
-                if output is not None: parts.append(_tag("output", _xml_text(output)))
+                parts.append(_tag("code", source))
+                if output is not None: parts.append(_tag("output", output))
         if not parts: return ""
         return _tag("context", "".join(parts)) + "\n"
 
@@ -558,13 +631,10 @@ class IPyAIExtension:
 
     def resolve_tools(self, prompt, hist, skills=None, notes=None, responses=None):
         ns = self.shell.user_ns
-        prompt_names = _tool_names(prompt)
-        missing = [o for o in prompt_names if o not in ns]
-        if missing: raise NameError(f"Missing tool(s) in user_ns: {', '.join(sorted(missing))}")
-        bad = [o for o in prompt_names if not callable(ns[o])]
-        if bad: raise TypeError(f"Non-callable tool(s): {', '.join(sorted(bad))}")
         all_refs = _tool_refs(prompt, hist, skills=skills, notes=notes, responses=responses)
-        return [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(all_refs) if callable(ns.get(o))]
+        tools = [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(all_refs) if callable(ns.get(o))]
+        bad = sorted(o for o in all_refs if o not in ns or not callable(ns.get(o)))
+        return tools, bad
 
     def save_prompt(self, prompt: str, response: str, history_line: int):
         if self.db is None: return
@@ -695,8 +765,8 @@ class IPyAIExtension:
         ctx = self.code_context(self.last_prompt_line()+1, self.current_prompt_line())
         parts = []
         if ctx: parts.append(ctx)
-        parts.append(f"<current-input>\n<prefix>{_xml_text(prefix)}</prefix>")
-        if suffix.strip(): parts.append(f"<suffix>{_xml_text(suffix)}</suffix>")
+        parts.append(f"<current-input>\n<prefix>{prefix}</prefix>")
+        if suffix.strip(): parts.append(f"<suffix>{suffix}</suffix>")
         parts.append("</current-input>")
         parts.append("\nReturn ONLY the completion text to insert immediately after the prefix."
             " Do not repeat the prefix or include any explanation.")
@@ -791,12 +861,22 @@ class IPyAIExtension:
             prev_line = o["history_line"]
         notes += self.note_strings(self.last_prompt_line()+1, history_line)
         responses = [o["response"] for o in recs]
-        tools = self.resolve_tools(prompt, recs, skills=self.skills, notes=notes, responses=responses)
+        tools, bad_tools = self.resolve_tools(prompt, recs, skills=self.skills, notes=notes, responses=responses)
+        ns = self.shell.user_ns
+        var_names = _var_refs(prompt, recs, skills=self.skills, notes=notes)
+        missing_vars = sorted(n for n in var_names if n not in ns)
+        all_missing = sorted(set(bad_tools + missing_vars))
+        var_xml = _format_var_xml(var_names, ns)
+        shell_cmds = _shell_refs(prompt, recs, skills=self.skills, notes=notes)
+        shell_xml = _run_shell_refs(shell_cmds)
+        prefix = var_xml + shell_xml
+        if all_missing: prefix += _tag("note", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(all_missing)}")
         full_prompt = self.format_prompt(prompt, self.last_prompt_line()+1, history_line)
+        if prefix: full_prompt = prefix + "\n" + full_prompt
         self.shell.user_ns[LAST_PROMPT] = prompt
         sp = self.system_prompt
         if self.skills: sp += _skills_xml(self.skills)
-        chat = AsyncChat(model=self.model, sp=sp, ns=self.shell.user_ns, hist=hist, tools=tools or None)
+        chat = AsyncChat(model=self.model, sp=sp, ns=ns, hist=hist, tools=tools or None)
         stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
         with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, code_theme=self.code_theme)
         self.shell.user_ns[LAST_RESPONSE] = text
