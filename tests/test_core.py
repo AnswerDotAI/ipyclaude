@@ -304,10 +304,10 @@ def test_unexpected_prompt_table_schema_is_recreated():
     shell = DummyShell()
     with shell.history_manager.db:
         shell.history_manager.db.execute("CREATE TABLE ai_prompts (id INTEGER PRIMARY KEY AUTOINCREMENT, session INTEGER NOT NULL, "
-                                         "prompt TEXT NOT NULL, response TEXT NOT NULL, history_line INTEGER NOT NULL DEFAULT 0, "
-                                         "prompt_line INTEGER NOT NULL DEFAULT 0)")
+            "prompt TEXT NOT NULL, response TEXT NOT NULL, history_line INTEGER NOT NULL DEFAULT 0, "
+            "prompt_line INTEGER NOT NULL DEFAULT 0)")
         shell.history_manager.db.execute("INSERT INTO ai_prompts (session, prompt, response, history_line, prompt_line) VALUES "
-                                         "(1, 'p', 'r', 1, 2)")
+            "(1, 'p', 'r', 1, 2)")
 
     ext = IPyAIExtension(shell=shell)
 
@@ -366,8 +366,7 @@ def test_handle_line_can_report_and_set_model(capsys):
         f"self.model='old-model'\nself.completion_model='{core.DEFAULT_COMPLETION_MODEL}'\n"
         f"self.think='m'\nself.search='h'\nself.code_theme='github-dark'\nself.log_exact=True\n"
         f"CONFIG_PATH={core.CONFIG_PATH!r}\nSYSP_PATH={core.SYSP_PATH!r}\nSTARTUP_PATH={core.STARTUP_PATH!r}\n"
-        f"LOG_PATH={core.LOG_PATH!r}\n"
-    )
+        f"LOG_PATH={core.LOG_PATH!r}\n")
 
     ext.handle_line("model new-model")
     assert ext.model == "new-model"
@@ -399,12 +398,10 @@ def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
 
     assert dummy_ai.instances[1].kwargs["hist"] == [
         "<user-request>first prompt</user-request>",
-        "first second",
-    ]
+        "first second"]
     assert ext.prompt_rows() == [
         ("first prompt", "first second"),
-        ("second prompt", "first second"),
-    ]
+        ("second prompt", "first second")]
 
 
 def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
@@ -425,8 +422,7 @@ def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
     assert dummy_ai.instances[1].kwargs["hist"] == [
         "<context><code>print('a')</code><output>a</output><code>print(1)</code><output>1</output><code>1+1</code><output>2</output></context>\n"
         "<user-request>What code history do you see in my session exactly?</user-request>",
-        "first second",
-    ]
+        "first second"]
     assert dummy_ai.instances[1].calls == [(
         "<context><code>from IPython.display import HTML,Markdown,Pretty,display</code><code>Markdown('A **b** *c*')</code>"
         "<output>A **b** *c*</output></context>\n<user-request>Do you see the earlier prints etc from the first prompt?</user-request>",
@@ -514,7 +510,7 @@ def test_save_startup_converts_notes_to_markdown_cells():
     nb = json.loads(core.STARTUP_PATH.read_text())
     c0 = {k:v for k,v in nb["cells"][0].items() if k != "id"}
     assert c0 == dict(cell_type="markdown", source="# My note",
-                      metadata=dict(ipyai=dict(kind="code", line=1, source='"# My note"')))
+        metadata=dict(ipyai=dict(kind="code", line=1, source='"# My note"')))
     assert nb["cells"][1]["cell_type"] == "code"
     assert nb["cells"][1]["source"] == "x = 1"
 
@@ -550,8 +546,8 @@ def test_history_context_uses_lines_since_last_prompt_only():
 def test_startup_replays_code_and_restores_prompts():
     startup_path = core.STARTUP_PATH
     cells = [dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
-             dict(cell_type="markdown", source="hello", metadata=dict(ipyai=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
-             dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None)]
+        dict(cell_type="markdown", source="hello", metadata=dict(ipyai=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
+        dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None)]
     startup_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)))
     shell = DummyShell()
     shell.execution_count = 1
@@ -583,7 +579,7 @@ def test_save_writes_startup_snapshot(capsys):
         cells=[
             dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
             dict(cell_type="markdown", source="first response",
-                 metadata=dict(ipyai=dict(kind="prompt", line=2, history_line=1, prompt="first prompt"))),
+                metadata=dict(ipyai=dict(kind="prompt", line=2, history_line=1, prompt="first prompt"))),
             dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None),
         ],
         metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
@@ -752,7 +748,7 @@ def test_skill_allowed_tools(tmp_path):
 
 def _mk_tool_response(fn, result_text):
     return (f"<details class='tool-usage-details'>\n<summary>{fn}</summary>\n"
-            f"```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"{fn}\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>")
+        f"```json\n{{\"id\":\"1\",\"call\":{{\"function\":\"{fn}\",\"arguments\":{{}}}},\"result\":\"{result_text}\"}}\n```\n</details>")
 
 def test_tool_results_with_allowed_tools():
     assert "helper" in _tool_results(_mk_tool_response("load_skill", "---\\nallowed-tools: helper\\n---\\nbody"))
@@ -926,7 +922,7 @@ def test_e2e_ipyai_session(tmp_path):
     env['IPYTHON_DIR'] = str(tmp_path / "ipython")
 
     args = ['-m', 'IPython', '--ext', 'ipyai', f'--HistoryManager.hist_file={hist_file}',
-            '--TerminalIPythonApp.display_banner=False', '--colors=NoColor']
+        '--TerminalIPythonApp.display_banner=False', '--colors=NoColor']
     child = pexpect.spawn(sys.executable, args, env=env, timeout=60, encoding='utf-8')
 
     def wait_prompt(n): child.expect(f'In \\[{n}\\]')

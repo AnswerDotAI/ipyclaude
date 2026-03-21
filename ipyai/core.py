@@ -1,4 +1,4 @@
-import argparse,ast,atexit,html,inspect,json,os,re,sqlite3,sys,uuid
+import argparse,ast,atexit,html,inspect,json,os,re,sys,uuid
 from contextlib import contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
@@ -92,7 +92,7 @@ def _extract_code_blocks(text):
     from mistletoe import Document
     from mistletoe.block_token import CodeFence
     return [child.children[0].content.strip() for child in Document(text).children
-            if isinstance(child, CodeFence) and child.language in ('python', 'py') and child.children and child.children[0].content.strip()]
+        if isinstance(child, CodeFence) and child.language in ('python', 'py') and child.children and child.children[0].content.strip()]
 
 
 def is_dot_prompt(lines: list[str]) -> bool: return bool(lines) and lines[0].startswith(".")
@@ -130,7 +130,7 @@ def _is_note(source):
     try: tree = ast.parse(source)
     except SyntaxError: return False
     return (len(tree.body) == 1 and isinstance(tree.body[0], ast.Expr)
-            and isinstance(tree.body[0].value, ast.Constant) and isinstance(tree.body[0].value.value, str))
+        and isinstance(tree.body[0].value, ast.Constant) and isinstance(tree.body[0].value.value, str))
 
 
 def _note_str(source): return ast.parse(source).body[0].value.value
@@ -222,7 +222,7 @@ async def _astream_to_live_markdown(chunks, out, code_theme: str, console_cls=Co
 
 
 async def astream_to_stdout(stream, formatter_cls: Callable[..., AsyncStreamFormatter]=AsyncStreamFormatter, out=None,
-                            code_theme: str=DEFAULT_CODE_THEME, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
+    code_theme: str=DEFAULT_CODE_THEME, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
     out = sys.stdout if out is None else out
     fmt = formatter_cls()
     chunks = fmt.format_stream(stream)
@@ -271,7 +271,7 @@ def _suppress_output_history(shell):
 
 def _default_config():
     return dict(model=os.environ.get("IPYAI_MODEL", DEFAULT_MODEL), completion_model=DEFAULT_COMPLETION_MODEL,
-                think=DEFAULT_THINK, search=DEFAULT_SEARCH, code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT)
+        think=DEFAULT_THINK, search=DEFAULT_SEARCH, code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT)
 
 
 def load_config(path=None) -> dict:
@@ -305,9 +305,9 @@ def _event_to_cell(o):
         source = o.get("source", "")
         if _is_note(source):
             return dict(id=_cell_id(), cell_type="markdown", source=_note_str(source),
-                        metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0), source=source)))
+                metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0), source=source)))
         return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0))),
-                    outputs=[], execution_count=None)
+            outputs=[], execution_count=None)
     if o.get("kind") == "prompt":
         meta = dict(kind="prompt", line=o.get("line", 0), history_line=o.get("history_line", 0), prompt=o.get("prompt", ""))
         return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""), metadata=dict(ipyai=meta))
@@ -321,7 +321,7 @@ def _cell_to_event(cell):
         return dict(kind="code", line=meta.get("line", 0), source=source)
     if kind == "prompt":
         return dict(kind="prompt", line=meta.get("line", 0), history_line=meta.get("history_line", 0),
-                    prompt=meta.get("prompt", ""), response=cell.get("source", ""))
+            prompt=meta.get("prompt", ""), response=cell.get("source", ""))
 
 
 def _default_startup(): return dict(cells=[], metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
@@ -699,7 +699,7 @@ class IPyAIExtension:
         if suffix.strip(): parts.append(f"<suffix>{_xml_text(suffix)}</suffix>")
         parts.append("</current-input>")
         parts.append("\nReturn ONLY the completion text to insert immediately after the prefix."
-                     " Do not repeat the prefix or include any explanation.")
+            " Do not repeat the prefix or include any explanation.")
         chat = AsyncChat(model=self.completion_model, sp=_COMPLETION_SP)
         res = await chat("\n".join(parts))
         return (contents(res).content or "").strip()
@@ -773,8 +773,8 @@ class IPyAIExtension:
         if arg:
             clean = arg.strip()
             vals = dict(model=lambda: clean, completion_model=lambda: clean or DEFAULT_COMPLETION_MODEL, code_theme=lambda: clean or DEFAULT_CODE_THEME,
-                        think=lambda: _validate_level("think", clean, self.think), search=lambda: _validate_level("search", clean, self.search),
-                        log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
+                think=lambda: _validate_level("think", clean, self.think), search=lambda: _validate_level("search", clean, self.search),
+                log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
         return self.run_prompt(line)
 

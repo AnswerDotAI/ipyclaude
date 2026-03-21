@@ -27,5 +27,8 @@ version = {attr = "ipyai.__version__"}
 [tool.setuptools.packages.find]
 include = ["ipyai*"]
 
+[tool.pytest.ini_options]
+filterwarnings = ["ignore::DeprecationWarning:pty"]
+
 [tool.fastship]
 
