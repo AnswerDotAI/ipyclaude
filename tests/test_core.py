@@ -13,6 +13,7 @@ from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     _parse_skill, _allowed_tools, _tool_results, _tool_refs,
     _var_names, _var_refs, _format_var_xml,
     _shell_names, _shell_refs, _run_shell_refs,
+    transform_prompt_mode,
     _discover_skills, _skills_xml, _strip_thinking, _extract_code_blocks, _eval_code_blocks, load_skill,
     _git_repo_root, _list_sessions, resume_session)
 
@@ -92,8 +93,10 @@ class DummyShell:
         self.execution_count = 2
         self.ran_cells = []
         self.loop_runner = asyncio.run
+        self.prompts = None
 
     def register_magics(self, magics): self.magics.append(magics)
+    def set_custom_exc(self, *args): pass
 
     def run_cell(self, source, store_history=False):
         self.ran_cells.append((source, store_history))
@@ -260,7 +263,7 @@ def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
     assert dummy_ai.instances[-1].calls == [(
         "<user-request>tell me something</user-request>",
         True,
-        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK),
+        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK, max_steps=41),
     )]
     assert dummy_ai.instances[-1].kwargs["model"] == ext.model
     assert dummy_ai.instances[-1].kwargs["sp"] == DEFAULT_SYSTEM_PROMPT
@@ -268,6 +271,7 @@ def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
     assert shell.user_ns[LAST_RESPONSE] == "first second"
     assert ext.prompt_rows() == [("tell me something", "first second")]
     assert ext.prompt_records()[0][3] == 1
+
 
 
 def test_run_prompt_suppresses_ipython_output_history_while_streaming(monkeypatch):
@@ -356,7 +360,7 @@ def test_config_values_drive_model_think_and_search(dummy_ai):
     assert dummy_ai.instances[-1].calls == [(
         "<user-request>tell me something</user-request>",
         True,
-        dict(search="h", think="m"),
+        dict(search="h", think="m", max_steps=41),
     )]
 
 
@@ -429,7 +433,7 @@ def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
         "<context><code>from IPython.display import HTML,Markdown,Pretty,display</code><code>Markdown('A **b** *c*')</code>"
         "<output>A **b** *c*</output></context>\n<user-request>Do you see the earlier prints etc from the first prompt?</user-request>",
         True,
-        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK),
+        dict(search=DEFAULT_SEARCH, think=DEFAULT_THINK, max_steps=41),
     )]
 
 
@@ -459,9 +463,7 @@ def test_tools_resolve_from_ampersand_backticks():
     ext = IPyAIExtension(shell=shell).load()
 
     tools, bad = ext.resolve_tools("please call &`demo` now", [])
-    assert len(tools) == 1
-    assert tools[0]["type"] == "function"
-    assert tools[0]["function"]["name"] == "demo"
+    assert any(t["function"]["name"] == "demo" for t in tools)
     assert bad == []
 
 
@@ -476,9 +478,7 @@ def test_tools_resolve_callable_objects_by_namespace_name():
     ext = IPyAIExtension(shell=shell).load()
 
     tools, bad = ext.resolve_tools("please call &`demo` now", [])
-    assert len(tools) == 1
-    assert tools[0]["type"] == "function"
-    assert tools[0]["function"]["name"] == "demo"
+    assert any(t["function"]["name"] == "demo" for t in tools)
     assert bad == []
 
 
@@ -769,6 +769,36 @@ def test_tool_refs_includes_skills_and_notes():
     refs = _tool_refs("use &`main`", [], skills=skills, notes=notes)
     assert refs == {"main", "load_skill", "analyze", "fmt", "helper"}
 
+def test_pyrun_auto_added_to_tools():
+    pytest.importorskip("safepyrun")
+    from safepyrun import RunPython
+    shell = DummyShell()
+    shell.user_ns["pyrun"] = RunPython(g=shell.user_ns)
+    ext = IPyAIExtension(shell=shell).load()
+    tools, bad = ext.resolve_tools("do something", [])
+    assert any(t["function"]["name"] == "pyrun" for t in tools)
+
+def test_bash_auto_added_to_tools():
+    pytest.importorskip("safecmd")
+    from safecmd import bash
+    shell = DummyShell()
+    shell.user_ns["bash"] = bash
+    ext = IPyAIExtension(shell=shell).load()
+    tools, bad = ext.resolve_tools("do something", [])
+    assert any(t["function"]["name"] == "bash" for t in tools)
+
+def test_bash_injected_on_load():
+    pytest.importorskip("safecmd")
+    shell = DummyShell()
+    ext = IPyAIExtension(shell=shell).load()
+    assert callable(shell.user_ns.get("bash"))
+
+def test_pyrun_not_added_when_absent():
+    shell = DummyShell()
+    ext = IPyAIExtension(shell=shell).load()
+    tools, bad = ext.resolve_tools("do something", [])
+    assert not any(t.get("function", {}).get("name") == "pyrun" for t in tools)
+
 def test_note_tool_refs_in_resolve(dummy_ai):
     def helper():
         "A helper tool"
@@ -817,7 +847,7 @@ def test_resolve_tools_missing_tool_not_raised(dummy_ai):
     shell,ext = mk_ext()
     ext.run_prompt("call &`nonexistent`")
     chat = dummy_ai.instances[-1]
-    assert '<note>' in chat.calls[0][0]
+    assert '<warnings>' in chat.calls[0][0]
     assert 'nonexistent' in chat.calls[0][0]
 
 def test_resolve_tools_noncallable_noted(dummy_ai):
@@ -825,7 +855,7 @@ def test_resolve_tools_noncallable_noted(dummy_ai):
     shell.user_ns["x"] = 42
     ext.run_prompt("call &`x`")
     chat = dummy_ai.instances[-1]
-    assert '<note>' in chat.calls[0][0]
+    assert '<warnings>' in chat.calls[0][0]
     assert 'x' in chat.calls[0][0]
 
 def test_var_in_prompt_adds_variable_xml(dummy_ai):
@@ -841,7 +871,7 @@ def test_missing_var_in_prompt_adds_note(dummy_ai):
     ext.run_prompt("check $`missing_var`")
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
-    assert '<note>' in prompt
+    assert '<warnings>' in prompt
     assert 'missing_var' in prompt
 
 def test_mixed_missing_tools_and_vars_in_note(dummy_ai):
@@ -938,6 +968,77 @@ def test_skill_shell_cmds_parsed(tmp_path):
 def test_sysprompt_mentions_variables_and_shell():
     assert '$`' in DEFAULT_SYSTEM_PROMPT
     assert '!`' in DEFAULT_SYSTEM_PROMPT
+
+
+## Prompt mode tests
+
+def test_prompt_mode_wraps_input_as_magic():
+    lines = transform_prompt_mode(["hello world\n"])
+    assert "run_cell_magic" in lines[0]
+    assert "ipyai" in lines[0]
+    assert "hello world" in lines[0]
+
+def test_prompt_mode_passes_through_semicolon_as_python():
+    lines = transform_prompt_mode([";x = 42\n"])
+    assert lines == ["x = 42\n"]
+
+def test_prompt_mode_passes_through_bang_as_shell():
+    lines = transform_prompt_mode(["!ls\n"])
+    assert lines == ["!ls\n"]
+
+def test_prompt_mode_passes_through_percent_as_magic():
+    lines = transform_prompt_mode(["%timeit 1+1\n"])
+    assert lines == ["%timeit 1+1\n"]
+
+def test_prompt_mode_passes_through_double_percent():
+    lines = transform_prompt_mode(["%%bash\n", "echo hi\n"])
+    assert lines == ["%%bash\n", "echo hi\n"]
+
+def test_prompt_mode_multiline():
+    lines = transform_prompt_mode(["tell me\\\n", "about python\n"])
+    assert "run_cell_magic" in lines[0]
+    assert "tell me" in lines[0] and "about python" in lines[0]
+
+def test_prompt_mode_empty_passthrough():
+    assert transform_prompt_mode(["\n"]) == ["\n"]
+    assert transform_prompt_mode([]) == []
+
+def test_prompt_mode_toggle(dummy_ai):
+    shell,ext = mk_ext()
+    assert not ext.prompt_mode
+    ext.handle_line("prompt")
+    assert ext.prompt_mode
+    ext.handle_line("prompt")
+    assert not ext.prompt_mode
+
+def test_prompt_mode_flag():
+    shell = DummyShell()
+    ext = IPyAIExtension(shell=shell, prompt_mode=True).load()
+    assert ext.prompt_mode
+
+def test_prompt_mode_config_default(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"prompt_mode": true}')
+    monkeypatch.setattr(core, "CONFIG_PATH", cfg)
+    shell = DummyShell()
+    ext = IPyAIExtension(shell=shell).load()
+    assert ext.prompt_mode
+
+def test_prompt_mode_config_with_flag_toggles(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text('{"prompt_mode": true}')
+    monkeypatch.setattr(core, "CONFIG_PATH", cfg)
+    shell = DummyShell()
+    ext = IPyAIExtension(shell=shell, prompt_mode=True).load()
+    assert not ext.prompt_mode
+
+def test_prompt_mode_registered_transformer(dummy_ai):
+    shell,ext = mk_ext()
+    ext.handle_line("prompt")
+    cts = shell.input_transformer_manager.cleanup_transforms
+    assert transform_prompt_mode in cts
+    ext.handle_line("prompt")
+    assert transform_prompt_mode not in cts
 
 
 def test_strip_thinking_shows_brains_while_thinking(): assert _strip_thinking("🧠🧠🧠") == "🧠🧠🧠"

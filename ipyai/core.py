@@ -1,4 +1,4 @@
-import argparse,ast,atexit,inspect,json,os,re,sys,uuid
+import argparse,ast,asyncio,atexit,inspect,json,os,re,signal,sys,uuid
 from contextlib import contextmanager
 from datetime import datetime,timezone
 from pathlib import Path
@@ -29,6 +29,7 @@ DEFAULT_THINK = "l"
 DEFAULT_SEARCH = "l"
 DEFAULT_CODE_THEME = "monokai"
 DEFAULT_LOG_EXACT = False
+DEFAULT_PROMPT_MODE = False
 DEFAULT_COMPLETION_MODEL = "claude-haiku-4-5-20251001"
 _COMPLETION_SP = "You are a code completion engine for IPython. Return ONLY the completion text that should be inserted at the cursor position. No explanation, no markdown, no code fences, no prefix repetition."
 DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside IPython.
@@ -51,6 +52,13 @@ The user can attach context to their prompt using backtick references:
 - `!`cmd`` runs a shell command and includes its output, shown as `<shell cmd="...">output</shell>` above the user's request
 
 Use tools when they will materially improve correctness or completeness; otherwise answer directly.
+
+You have these key tools always available:
+- `bash(cmd)`: Run shell commands safely via an allowlist. Supports pipes, redirects, subshells — all standard shell features. If a command is disallowed, inform the user so they can whitelist it.
+- `pyrun(code)`: Execute Python code in a sandboxed environment with access to the user's namespace. Use `pyrun('dir(...)')` to discover what's available on a module, object, or class. Use `pyrun('doc(...)')` to get its signature and docstring. Run `pyrun('doc(pyrun)')` to learn what's available in the sandbox.
+- `ex(path, cmds)`: Run ex editor commands on a file. Great for reading files, search/replace, indent/dedent, `g/pat/cmd`, and surgical multi-line edits without rewriting whole files.
+
+IMPORTANT: The API may inject `bash_code_execution`, `text_editor_code_execution`, and `code_execution` tools. Do NOT call these — they run in a remote sandbox with no access to the user's local files or IPython session.
 
 If a `<skills>` section is appended to this system prompt, it lists available skills. When a user's request matches a skill description, call the `load_skill` tool with the skill's path to load its full instructions before responding.
 
@@ -97,7 +105,7 @@ _tool_re = re.compile(r"&`(\w+)`")
 _var_re = re.compile(r"\$`(\w+)`")
 _shell_re = re.compile(r"!`([^`]+)`")
 _tool_block_re = re.compile(
-    r"<details class='tool-usage-details'>\s*<summary>(.*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>", flags=re.DOTALL)
+    r"<details class='tool-usage-details'>\s*<summary>([^\n]*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>", flags=re.DOTALL)
 _status_attrs = "model completion_model think search code_theme log_exact".split()
 
 
@@ -121,6 +129,17 @@ def transform_dots(lines: list[str], magic: str=MAGIC_NAME) -> list[str]:
     prompt = prompt_from_lines(lines)
     if prompt is None: return lines
     return [f"get_ipython().run_cell_magic({magic!r}, '', {prompt!r})\n"]
+
+
+def transform_prompt_mode(lines: list[str], magic: str=MAGIC_NAME) -> list[str]:
+    if not lines: return lines
+    first = lines[0]
+    stripped = first.lstrip()
+    if not stripped or stripped == '\n': return lines
+    if stripped.startswith(('!', '%')): return lines
+    if stripped.startswith(';'): return [first.replace(';', '', 1)] + lines[1:]
+    text = "".join(lines).replace("\\\n", "\n")
+    return [f"get_ipython().run_cell_magic({magic!r}, '', {text!r})\n"]
 
 
 def _tag(name: str, content="", **attrs) -> str:
@@ -253,13 +272,17 @@ def _truncate_short(s: str, mx: int=100) -> str:
     return s if len(s) <= mx else s[:mx-3] + "..."
 
 
+_tool_pending_re = re.compile(r"\n- ⏳ `(.+?)` ⏳")
+
 def compact_tool_display(text: str, result_chars: int=100) -> str:
     def _repl(m):
         summary,payload = m.groups()
         try: result = json.loads(payload).get("result", "")
         except Exception: return m.group(0)
         return f"🔧 {_single_line(summary)} => {_truncate_short(str(result), mx=result_chars)}"
-    return _tool_block_re.sub(_repl, text)
+    text = _tool_block_re.sub(_repl, text)
+    text = _tool_pending_re.sub(lambda m: '' if f"🔧 {m.group(1)} =>" in text else m.group(0), text)
+    return text
 
 
 def _strip_thinking(text):
@@ -274,7 +297,7 @@ def _markdown_renderable(text: str, code_theme: str, markdown_cls=Markdown):
     return markdown_cls(text, code_theme=code_theme, inline_code_theme=code_theme, inline_code_lexer="python")
 
 
-async def _astream_to_live_markdown(chunks, out, code_theme: str, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
+async def _astream_to_live_markdown(chunks, out, code_theme: str, partial=None, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
     first = None
     async for chunk in chunks:
         if chunk:
@@ -283,28 +306,31 @@ async def _astream_to_live_markdown(chunks, out, code_theme: str, console_cls=Co
     if first is None: return ""
     console = console_cls(file=out, force_terminal=True)
     text = first
+    if partial is not None: partial.append(text)
     with live_cls(_markdown_renderable(_display_text(text), code_theme, markdown_cls), console=console,
         auto_refresh=False, transient=False, redirect_stdout=False, redirect_stderr=False) as live:
         async for chunk in chunks:
             if not chunk: continue
             text += chunk
+            if partial is not None: partial.append(chunk)
             live.update(_markdown_renderable(_display_text(text), code_theme, markdown_cls), refresh=True)
     return text
 
 
 async def astream_to_stdout(stream, formatter_cls: Callable[..., AsyncStreamFormatter]=AsyncStreamFormatter, out=None,
-    code_theme: str=DEFAULT_CODE_THEME, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
+    code_theme: str=DEFAULT_CODE_THEME, partial=None, console_cls=Console, markdown_cls=Markdown, live_cls=Live) -> str:
     out = sys.stdout if out is None else out
     fmt = formatter_cls()
     chunks = fmt.format_stream(stream)
-    if getattr(out, "isatty", lambda: False)(): return await _astream_to_live_markdown(chunks, out, code_theme, console_cls=console_cls,
-        markdown_cls=markdown_cls, live_cls=live_cls)
+    if getattr(out, "isatty", lambda: False)(): return await _astream_to_live_markdown(chunks, out, code_theme, partial=partial,
+        console_cls=console_cls, markdown_cls=markdown_cls, live_cls=live_cls)
     res = []
     async for chunk in chunks:
         if not chunk: continue
         out.write(chunk)
         out.flush()
         res.append(chunk)
+        if partial is not None: partial.append(chunk)
     text = "".join(res)
     if text and not text.endswith("\n"):
         out.write("\n")
@@ -342,7 +368,8 @@ def _suppress_output_history(shell):
 
 def _default_config():
     return dict(model=os.environ.get("IPYAI_MODEL", DEFAULT_MODEL), completion_model=DEFAULT_COMPLETION_MODEL,
-        think=DEFAULT_THINK, search=DEFAULT_SEARCH, code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT)
+        think=DEFAULT_THINK, search=DEFAULT_SEARCH, code_theme=DEFAULT_CODE_THEME, log_exact=DEFAULT_LOG_EXACT,
+        prompt_mode=DEFAULT_PROMPT_MODE)
 
 
 def load_config(path=None) -> dict:
@@ -359,6 +386,7 @@ def load_config(path=None) -> dict:
     cfg["search"] = _validate_level("search", cfg["search"], DEFAULT_SEARCH)
     cfg["code_theme"] = str(cfg["code_theme"]).strip() or DEFAULT_CODE_THEME
     cfg["log_exact"] = _validate_bool("log_exact", cfg["log_exact"], DEFAULT_LOG_EXACT)
+    cfg["prompt_mode"] = _validate_bool("prompt_mode", cfg["prompt_mode"], DEFAULT_PROMPT_MODE)
     return cfg
 
 
@@ -534,15 +562,16 @@ class AIMagics(Magics):
         self.ext = ext
 
     @line_cell_magic("ipyai")
-    def ipyai(self, line: str="", cell: str | None=None):
+    async def ipyai(self, line: str="", cell: str | None=None):
         if cell is None: return self.ext.handle_line(line)
-        return self.ext._run_prompt(cell)
+        await self.ext._run_prompt(cell)
 
 
 class IPyAIExtension:
-    def __init__(self, shell, model=None, completion_model=None, think=None, search=None, code_theme=None, log_exact=None, system_prompt=None):
+    def __init__(self, shell, model=None, completion_model=None, think=None, search=None, code_theme=None, log_exact=None, system_prompt=None, prompt_mode=None):
         self.shell,self.loaded = shell,False
         cfg = load_config(CONFIG_PATH)
+        self.prompt_mode = cfg["prompt_mode"] ^ bool(prompt_mode)
         self.model = model or cfg["model"]
         self.completion_model = completion_model or cfg["completion_model"]
         self.think = _validate_level("think", think if think is not None else cfg["think"], DEFAULT_THINK)
@@ -552,6 +581,12 @@ class IPyAIExtension:
         self.system_prompt = system_prompt if system_prompt is not None else load_sysp(SYSP_PATH)
         self.skills = _discover_skills()
         if self.skills: shell.user_ns["load_skill"] = load_skill
+        from safecmd import bash, ex, sed
+        from safepyrun import doc
+        shell.user_ns.setdefault("bash", bash)
+        shell.user_ns.setdefault("ex", ex)
+        shell.user_ns.setdefault("sed", sed)
+        shell.user_ns.setdefault("doc", doc)
         load_startup(STARTUP_PATH)
 
     @property
@@ -632,8 +667,11 @@ class IPyAIExtension:
     def resolve_tools(self, prompt, hist, skills=None, notes=None, responses=None):
         ns = self.shell.user_ns
         all_refs = _tool_refs(prompt, hist, skills=skills, notes=notes, responses=responses)
+        for t in ("pyrun", "bash", "ex", "sed"):
+            if callable(ns.get(t)): all_refs.add(t)
         tools = [dict(type="function", function=get_schema_nm(o, ns, pname="parameters")) for o in sorted(all_refs) if callable(ns.get(o))]
-        bad = sorted(o for o in all_refs if o not in ns or not callable(ns.get(o)))
+        check_refs = _tool_refs(prompt, hist, notes=notes, responses=responses)
+        bad = sorted(o for o in check_refs if o not in ns or not callable(ns.get(o)))
         return tools, bad
 
     def save_prompt(self, prompt: str, response: str, history_line: int):
@@ -759,6 +797,13 @@ class IPyAIExtension:
                         app.invalidate()
                 except Exception: pass
             app.create_background_task(_do_complete())
+        # Alt-P: toggle prompt mode
+        @pt_app.key_bindings.add('escape', 'p')
+        def _toggle_prompt(event):
+            self._toggle_prompt_mode()
+            from prompt_toolkit.formatted_text import PygmentsTokens
+            pt_app.message = PygmentsTokens(self.shell.prompts.in_prompt_tokens())
+            event.app.invalidate()
 
     async def _ai_complete(self, document):
         prefix,suffix = document.text_before_cursor,document.text_after_cursor
@@ -774,14 +819,15 @@ class IPyAIExtension:
         res = await chat("\n".join(parts))
         return (contents(res).content or "").strip()
 
-    @staticmethod
-    def _patch_lexer():
+    def _patch_lexer(self):
         from IPython.terminal.ptutils import IPythonPTLexer
         from prompt_toolkit.lexers import SimpleLexer
         _plain = SimpleLexer()
         _orig = IPythonPTLexer.lex_document
+        ext = self
         def _lex_document(self, document):
             text = document.text.lstrip()
+            if ext.prompt_mode and not text.startswith((';', '!', '%')): return _plain.lex_document(document)
             if text.startswith('.') or text.startswith('%%ipyai'): return _plain.lex_document(document)
             return _orig(self, document)
         IPythonPTLexer.lex_document = _lex_document
@@ -790,7 +836,10 @@ class IPyAIExtension:
         if self.loaded: return self
         self.ensure_prompt_table()
         cts = self.shell.input_transformer_manager.cleanup_transforms
-        if transform_dots not in cts:
+        if self.prompt_mode:
+            if transform_prompt_mode not in cts: cts.insert(0, transform_prompt_mode)
+            self._swap_prompts()
+        elif transform_dots not in cts:
             idx = 1 if cts and cts[0] is leading_empty_lines else 0
             cts.insert(idx, transform_dots)
         self.shell.register_magics(AIMagics(self.shell, self))
@@ -807,6 +856,7 @@ class IPyAIExtension:
         if not self.loaded: return self
         cts = self.shell.input_transformer_manager.cleanup_transforms
         if transform_dots in cts: cts.remove(transform_dots)
+        if transform_prompt_mode in cts: cts.remove(transform_prompt_mode)
         if self.shell.user_ns.get(EXTENSION_NS) is self: self.shell.user_ns.pop(EXTENSION_NS, None)
         if getattr(self.shell, EXTENSION_ATTR, None) is self: delattr(self.shell, EXTENSION_ATTR)
         self.loaded = False
@@ -818,6 +868,37 @@ class IPyAIExtension:
         setattr(self, attr, value)
         return self._show(attr)
 
+    def _toggle_prompt_mode(self):
+        self.prompt_mode = not self.prompt_mode
+        cts = self.shell.input_transformer_manager.cleanup_transforms
+        if self.prompt_mode:
+            if transform_prompt_mode not in cts: cts.insert(0, transform_prompt_mode)
+            if transform_dots in cts: cts.remove(transform_dots)
+        else:
+            if transform_prompt_mode in cts: cts.remove(transform_prompt_mode)
+            if transform_dots not in cts:
+                idx = 1 if cts and cts[0] is leading_empty_lines else 0
+                cts.insert(idx, transform_dots)
+        self._swap_prompts()
+        state = "ON" if self.prompt_mode else "OFF"
+        print(f"Prompt mode {state}")
+
+    def _swap_prompts(self):
+        from IPython.terminal.prompts import Prompts, Token
+        shell = self.shell
+        if self.prompt_mode:
+            if not hasattr(self, '_orig_prompts'): self._orig_prompts = shell.prompts
+            class PromptModePrompts(Prompts):
+                def in_prompt_tokens(self_p):
+                    return [
+                        (Token.Prompt, 'Pr ['),
+                        (Token.PromptNum, str(shell.execution_count)),
+                        (Token.Prompt, ']: '),
+                    ]
+            shell.prompts = PromptModePrompts(shell)
+        elif hasattr(self, '_orig_prompts'):
+            shell.prompts = self._orig_prompts
+
     def handle_line(self, line: str):
         line = line.strip()
         if not line:
@@ -827,6 +908,7 @@ class IPyAIExtension:
             print(f"{STARTUP_PATH=}")
             return print(f"{LOG_PATH=}")
         if line in _status_attrs: return self._show(line)
+        if line == "prompt": return self._toggle_prompt_mode()
         if line == "reset":
             n = self.reset_session_history()
             return print(f"Deleted {n} AI prompts from session {self.session_number}.")
@@ -869,16 +951,27 @@ class IPyAIExtension:
         var_xml = _format_var_xml(var_names, ns)
         shell_cmds = _shell_refs(prompt, recs, skills=self.skills, notes=notes)
         shell_xml = _run_shell_refs(shell_cmds)
+        warnings = ""
+        if all_missing: warnings = _tag("warnings", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(all_missing)}") + "\n"
         prefix = var_xml + shell_xml
-        if all_missing: prefix += _tag("note", f"The following symbols were referenced but aren't defined in the interpreter: {', '.join(all_missing)}")
         full_prompt = self.format_prompt(prompt, self.last_prompt_line()+1, history_line)
-        if prefix: full_prompt = prefix + "\n" + full_prompt
+        full_prompt = warnings + prefix + full_prompt
         self.shell.user_ns[LAST_PROMPT] = prompt
         sp = self.system_prompt
         if self.skills: sp += _skills_xml(self.skills)
         chat = AsyncChat(model=self.model, sp=sp, ns=ns, hist=hist, tools=tools or None)
-        stream = await chat(full_prompt, stream=True, think=self.think, search=self.search)
-        with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, code_theme=self.code_theme)
+        stream = await chat(full_prompt, stream=True, think=self.think, search=self.search, max_steps=41)
+        loop = asyncio.get_running_loop()
+        task = asyncio.current_task()
+        loop.add_signal_handler(signal.SIGINT, task.cancel)
+        partial = []
+        try:
+            with _suppress_output_history(self.shell): text = await astream_to_stdout(stream, code_theme=self.code_theme, partial=partial)
+        except asyncio.CancelledError:
+            text = "".join(partial) + "\n<system>user interrupted</system>"
+            print("\nstopped")
+        finally:
+            loop.remove_signal_handler(signal.SIGINT)
         self.shell.user_ns[LAST_RESPONSE] = text
         ng = getattr(self.shell, '_ipythonng_extension', None)
         if ng: ng._pty_output = _strip_thinking(text)
@@ -898,7 +991,7 @@ def _await_cell_magic(lines):
     if lines and 'get_ipython().run_cell_magic(' in lines[0]: lines = ['await ' + lines[0]] + lines[1:]
     return lines
 
-def create_extension(shell=None, resume=None, **kwargs):
+def create_extension(shell=None, resume=None, prompt_mode=False, **kwargs):
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
     _ensure_prompts_table(shell.history_manager.db)
@@ -909,7 +1002,7 @@ def create_extension(shell=None, resume=None, **kwargs):
             else: print("No sessions found for this directory.")
         else: resume_session(shell, resume)
     ext = getattr(shell, EXTENSION_ATTR, None)
-    if ext is None: ext = IPyAIExtension(shell=shell, **kwargs)
+    if ext is None: ext = IPyAIExtension(shell=shell, prompt_mode=prompt_mode, **kwargs)
     if not ext.loaded: ext.load()
     lts = shell.input_transformer_manager.line_transforms
     if not any(getattr(f, '__name__', None) == '_await_cell_magic' for f in lts): lts.append(_await_cell_magic)
@@ -924,6 +1017,7 @@ def create_extension(shell=None, resume=None, **kwargs):
 
 _ng_parser = argparse.ArgumentParser(add_help=False)
 _ng_parser.add_argument('-r', type=int, nargs='?', const=-1, default=None)
+_ng_parser.add_argument('-p', action='store_true', default=False)
 
 def _parse_ng_flags():
     "Parse IPYTHONNG_FLAGS env var via argparse."
@@ -933,7 +1027,7 @@ def _parse_ng_flags():
 
 def load_ipython_extension(ipython):
     flags = _parse_ng_flags()
-    return create_extension(ipython, resume=flags.r)
+    return create_extension(ipython, resume=flags.r, prompt_mode=flags.p)
 
 
 def unload_ipython_extension(ipython):
