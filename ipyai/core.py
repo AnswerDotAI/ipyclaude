@@ -13,8 +13,12 @@ from IPython.core.magic import Magics, line_cell_magic, magics_class
 from IPython.core.ultratb import SyntaxTB
 from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse,contents
 from rich.console import Console
+from rich.file_proxy import FileProxy
 from rich.live import Live
 from rich.markdown import Markdown, TableDataElement
+
+# Fix Rich bug: FileProxy.isatty doesn't delegate to underlying file
+FileProxy.isatty = lambda self: self.rich_proxied_file.isatty()
 
 # Fix Rich bug: TableDataElement.on_text clobbers syntax-highlight spans
 def _tde_on_text(self, context, text):
@@ -486,19 +490,22 @@ def _skills_xml(skills):
 
 _eval_re = re.compile(r'^#\|\s*eval:\s*true\s*$', re.MULTILINE)
 
-def _eval_code_blocks(text, shell):
-    "Run python code blocks starting with `#| eval: true` via `shell.run_cell`."
+async def _eval_code_blocks(text, shell):
+    "Run python code blocks starting with `#| eval: true` via `shell.run_cell_async`."
     for block in _extract_code_blocks(text):
-        if _eval_re.match(block.split('\n', 1)[0]): shell.run_cell(block, store_history=False)
+        if _eval_re.match(block.split('\n', 1)[0]):
+            await shell.run_cell_async(block, store_history=False, transformed_cell=block)
 
-def load_skill(path:str):  # path: Path to the skill directory
+_eval_block_re = re.compile(r"```(?:python|py)\s*\n#\|\s*eval:\s*true\b.*?```\s*\n?", flags=re.DOTALL)
+
+async def load_skill(path:str):  # path: Path to the skill directory
     "Load a skill's full instructions from its SKILL.md file."
     p = Path(path) / "SKILL.md"
     if not p.exists(): return FullResponse(f"Error: SKILL.md not found at {p}")
     text = p.read_text()
     shell = get_ipython()
-    if shell: _eval_code_blocks(text, shell)
-    return FullResponse(text)
+    if shell: await _eval_code_blocks(text, shell)
+    return FullResponse(_eval_block_re.sub('', text))
 
 
 @patch_to(inspect, nm="getfile")
