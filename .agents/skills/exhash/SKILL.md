@@ -23,7 +23,7 @@ allow('lnhashview', 'lnhashview_file', 'exhash', 'exhash_file', 'lnhash')
 | `line_hash(line)` | Get just the 4-char hex hash for a line |
 | `exhash(text, cmds, sw=4)` | Apply commands to text, return result dict |
 | `exhash_result(results)` | Format modified lines from result dicts |
-| `lnhashview_file(path)` | View file contents with `lineno\|hash\|  content` for each line |
+| `lnhashview_file(path, start=None, end=None)` | View file contents with `lineno\|hash\|  content`, optionally filtered by 1-based `start`/`end` |
 | `exhash_file(path, cmds, sw=4, inplace=False)` | Like `exhash` but reads from file; with `inplace=True` writes back atomically on success |
 
 ## Return Value
@@ -87,6 +87,9 @@ new_text = '\n'.join(result['lines'])
 lnhashview_file('/tmp/myfile.py')
 # => ['1|a020|  def greet(name):', '2|944e|      msg = ...', ...]
 
+# View just lines 10-20
+lnhashview_file('/tmp/myfile.py', 10, 20)
+
 # Edit without modifying the file (dry run)
 result = exhash_file('/tmp/myfile.py', ["2|944e|s/Hello/Hi/"])
 
@@ -95,6 +98,8 @@ result = exhash_file('/tmp/myfile.py', ["2|944e|s/Hello/Hi/"], inplace=True)
 ```
 
 **Atomic writes:** With `inplace=True`, the file is only written on success. If a hash verification fails, the file is left untouched.
+
+**Tip:** Use `rg -n` or `grep -n` to find the line numbers you need, then pass that range to `lnhashview_file` to get the hashed addresses for editing.
 
 ## Multi-command Batches
 

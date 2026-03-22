@@ -107,6 +107,9 @@ class DummyShell:
         except Exception: pass
         return SimpleNamespace(success=True)
 
+    async def run_cell_async(self, source, store_history=False, transformed_cell=None):
+        return self.run_cell(transformed_cell or source, store_history=store_history)
+
 
 @pytest.fixture(autouse=True)
 def _config_paths(monkeypatch, tmp_path):
@@ -410,6 +413,23 @@ def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
         ("second prompt", "first second")]
 
 
+def test_interrupted_prompt_with_no_output_has_valid_history(dummy_ai):
+    """When a prompt is interrupted before any output, the saved response should
+    still produce a valid assistant message in the history for the next prompt."""
+    shell,ext = mk_ext()
+
+    # Simulate an interrupted prompt that produced no output
+    ext.save_prompt("interrupted prompt", "", 1)
+    shell.execution_count = 3
+    ext.run_prompt("follow up")
+
+    # The history sent to the model should have a non-empty assistant message
+    hist = dummy_ai.instances[0].kwargs["hist"]
+    assert len(hist) == 2  # user + assistant from interrupted prompt
+    # Assistant message (the interrupted response) should not be empty
+    assert hist[1] != "", "Empty assistant response in history causes prefill errors"
+
+
 def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
     shell,ext = mk_ext()
     shell.history_manager.add(1, "print('a')", "a")
@@ -672,37 +692,37 @@ def test_skills_xml_formats_correctly():
     assert "load_skill" in xml
 
 
-def test_load_skill_reads_skill_md(tmp_path):
+async def test_load_skill_reads_skill_md(tmp_path):
     d = _mk_skill(tmp_path, "test-skill")
-    result = load_skill(str(d))
+    result = await load_skill(str(d))
     assert "Instructions here." in result
     assert "name: test-skill" in result
 
 
-def test_load_skill_missing_returns_error(tmp_path):
-    result = load_skill(str(tmp_path / "nope"))
+async def test_load_skill_missing_returns_error(tmp_path):
+    result = await load_skill(str(tmp_path / "nope"))
     assert "Error" in result
 
-def test_eval_code_blocks_runs_eval_true():
+async def test_eval_code_blocks_runs_eval_true():
     shell,ext = mk_ext()
     text = "# Intro\n\n```python\n#|eval: true\ndef foo(): return 42\n```\n\n```python\ndef bar(): return 99\n```"
-    _eval_code_blocks(text, shell)
+    await _eval_code_blocks(text, shell)
     assert shell.user_ns["foo"]() == 42
     assert "bar" not in shell.user_ns
 
-def test_eval_code_blocks_space_after_pipe():
+async def test_eval_code_blocks_space_after_pipe():
     shell,ext = mk_ext()
     text = "```python\n#| eval: true\nx = 7\n```"
-    _eval_code_blocks(text, shell)
+    await _eval_code_blocks(text, shell)
     assert shell.user_ns["x"] == 7
 
-def test_load_skill_evals_code_blocks(tmp_path):
+async def test_load_skill_evals_code_blocks(tmp_path):
     d = tmp_path / "eval-skill"
     d.mkdir()
     text = "---\nname: eval-skill\ndescription: test\n---\n\n```python\n#|eval: true\ndef my_tool(): return 'loaded'\n```\n"
     (d / "SKILL.md").write_text(text)
     shell,ext = mk_ext()
-    _eval_code_blocks(text, shell)
+    await _eval_code_blocks(text, shell)
     assert shell.user_ns["my_tool"]() == "loaded"
 
 

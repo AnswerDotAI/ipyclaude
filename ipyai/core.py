@@ -662,6 +662,7 @@ class IPyAIExtension:
         hist,res = [],[]
         prev_line = self.reset_line
         for pid,prompt,response,history_line in self.prompt_records():
+            if not response.strip(): response = "<system>user interrupted</system>"
             hist += [self.format_prompt(prompt, prev_line+1, history_line), response]
             res.append(dict(id=pid, prompt=prompt, response=response, history_line=history_line))
             prev_line = history_line
