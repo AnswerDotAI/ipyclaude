@@ -21,19 +21,20 @@ ex('f.py', linenums=True)              # view with line numbers
 ex('f.py', cmds='10,20p')              # view a range
 ex('f.py', cmds='10,20#')              # view a range with line numbers
 
-ex('f.py', cmds='5s/old/new/')         # substitute on line 5
-ex('f.py', cmds='%s/old/new/g')        # whole-file substitute
-ex('f.py', cmds='g/DEBUG/d')           # global delete
+ex('f.py', cmds='5s/old/new/\n4,6#')     # substitute on line 5, then check
+ex('f.py', cmds='%s/old/new/g', linenums=True)        # whole-file substitute; see result immediately
+ex('f.py', cmds='10,50g/DEBUG/d')     # delete matching lines in a range
 
-ex('f.py', cmds='5,10>')              # indent (uses sw)
-ex('f.py', cmds='5,10<', sw=2)        # dedent with sw=2
+ex('f.py', cmds='5,10>\n4,11#')       # indent, then check surrounding lines
+ex('f.py', cmds='5,10<\n4,11#', sw=2)    # dedent, then check surrounding lines
 
-ex('f.py', cmds='1,3co10')            # copy lines 1-3 after line 10
-ex('f.py', cmds='5,7m20')             # move lines 5-7 after line 20
+ex('f.py', cmds='1,3co10\n10,14#')      # copy lines 1-3 after line 10, then check
+ex('f.py', cmds='5,7m20\n19,23#')       # move lines 5-7 after line 20, then check
 
 ex('f.py', cmds='''5a
     x = 1
-.''')
+.
+4,7#''')
 
 ex('new.py', cmds='''a
 def hello():
@@ -43,7 +44,7 @@ def hello():
 
 ## Gotchas
 
-- **Newlines in `s//`** — use `\r` to insert, `\n` to match.
+- **Newlines in `s//`** — use `\r` to insert, `\n` to match. Use `\\n` to insert a literal `\n`.
 - **Line numbers shift** mid-command after inserts/deletes.
 - **Alternate `s` delimiters** — `#`, `@`, `+`, `;` all work (e.g. `s#/old/path#/new/path#`). `|` does not (it's the ex command separator).
 - **Brackets in patterns** — escape with `\[` and `\]` in the match side. Unescaped in the replacement.
@@ -57,5 +58,5 @@ def hello():
 
 ```python
 bash("rg -n 'pattern' file.py")   # find line numbers
-ex('file.py', cmds='14s/old/new/', linenums=True)  # edit by line number
+ex('file.py', cmds='14s/old/new/\n13,15#')  # edit by line number, then check
 ```
