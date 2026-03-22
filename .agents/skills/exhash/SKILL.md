@@ -5,7 +5,7 @@ description: Guide for using the exhash verified line-addressed editor. Use when
 
 ```python
 #|eval: true
-from exhash import exhash, exhash_file, lnhashview, lnhashview_file, lnhash, line_hash, exhash_result
+from exhash import exhash, exhash_file, lnhashview, lnhashview_file, lnhash, line_hash
 allow('lnhashview', 'lnhashview_file', 'exhash', 'exhash_file', 'lnhash')
 ```
 # exhash() Guide
@@ -28,11 +28,20 @@ allow('lnhashview', 'lnhashview_file', 'exhash', 'exhash_file', 'lnhash')
 
 ## Return Value
 
-`exhash()` returns a dict with:
+`exhash()` returns a result object with:
 - **`lines`** — list of output lines
 - **`hashes`** — lnhash for each output line
 - **`modified`** — 1-based line numbers of modified/added lines
 - **`deleted`** — 1-based line numbers of removed lines (in original)
+
+`exhash_file()` returns the same result object. With `inplace=True`, the result is auto-displayed as a diff. Otherwise, use `str()` or `print()` to see the diff:
+
+```
+1|a020|  def greet(name):
+-2|c748|      msg = "Hi, " + name
++2|756b|      msg = "Hey, " + name
+ 3|e005|      print(msg)
+```
 
 ## Addressing
 
