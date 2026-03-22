@@ -48,8 +48,8 @@ allow('lnhashview', 'lnhashview_file', 'exhash', 'exhash_file', 'lnhash')
 
 | Command | Description | Example |
 |---|---|---|
-| `s/pat/rep/[flags]` | Substitute. Rust regex. `$1` for captures. Flags: `g`=all, `i`=case-insensitive | `3\|0b26\|s/(\w+) = (\d+)/$1 = int($2)/` |
-| `y/src/dst/` | Transliterate chars | `3\|0b26\|y/xyz/XYZ/` |
+| `s/pat/rep/[flags]` | Substitute. Rust regex. `$1` for captures. Flags: `g`=all, `i`=case-insensitive. Any non-alnum delimiter: `s@pat@rep@` | `3\|0b26\|s/(\w+) = (\d+)/$1 = int($2)/` |
+| `y/src/dst/` | Transliterate chars. Any non-alnum delimiter: `y@src@dst@` | `3\|0b26\|y/xyz/XYZ/` |
 | `d` | Delete line(s) | `3\|0b26\|d` |
 | `a` | Append text after line (remaining lines are the text block) | `6\|6e37\|a\n    new line` |
 | `i` | Insert text before line | `1\|2eda\|i\n# comment` |
@@ -61,8 +61,8 @@ allow('lnhashview', 'lnhashview_file', 'exhash', 'exhash_file', 'lnhash')
 | `<[n]` | Dedent n levels | `3\|0b26\|,5\|09b9\|<2` |
 | `sort` | Sort lines alphabetically | `3\|0b26\|,5\|09b9\|sort` |
 | `p` | Print (include in output without changing) | `3\|0b26\|p` |
-| `g/pat/cmd` | Global: run cmd on matching lines | `%g/print/d` |
-| `g!/pat/cmd` or `v/pat/cmd` | Inverted global | `%v/def/d` |
+| `g/pat/cmd` | Global: run cmd on matching lines. Any non-alnum delimiter: `g@pat@cmd` | `%g/print/d` |
+| `g!/pat/cmd` or `v/pat/cmd` | Inverted global. Any non-alnum delimiter works | `%v/def/d` |
 
 ## Workflow
 
@@ -74,8 +74,9 @@ lnhashview(text)
 # 2. Edit using those addresses
 result = exhash(text, ["2|733a|s/hello/hi/"])
 # => {'lines': [...], 'hashes': [...], 'modified': [2], 'deleted': []}
-
 # 3. Use the result for further edits
+new_text = '\n'.join(result['lines'])
+```
 
 ## File-based Functions
 
@@ -94,8 +95,6 @@ result = exhash_file('/tmp/myfile.py', ["2|944e|s/Hello/Hi/"], inplace=True)
 ```
 
 **Atomic writes:** With `inplace=True`, the file is only written on success. If a hash verification fails, the file is left untouched.
-new_text = '\n'.join(result['lines'])
-```
 
 ## Multi-command Batches
 
@@ -118,7 +117,8 @@ This is the core safety feature — no silent mis-edits.
 
 ## Gotchas
 
-- **`s///` only uses `/` as delimiter** — unlike `ex()`, alternate delimiters like `#` or `@` are not supported.
+- **Custom delimiters:** `s`, `y`, `g`, `g!`, and `v` all accept any non-alphanumeric char as delimiter instead of `/`, e.g. `s@pat@rep@`, `g@pat@cmd`. Each command in a combo picks its own delimiter independently: `g@a/b@s/old/new/`.
+- **Literal newlines in pattern/replacement** are supported in `s` — this joins or splits lines as needed.
 - **Regex syntax is Rust's** — use `$1`, `$2` (not `\1`) for capture groups in replacements.
 - **`g/pat/cmd` needs a range prefix** — use `%g/pat/cmd` for whole-file, or `N|h|,M|h|g/pat/cmd` for a range. Bare `g/pat/cmd` without an address fails.
 - **Multi-line `a`/`i`/`c`** — use `\n` in the command string to add multiple lines. No `.` terminator needed.
