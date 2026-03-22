@@ -308,7 +308,7 @@ async def _astream_to_live_markdown(chunks, out, code_theme: str, partial=None, 
     text = first
     if partial is not None: partial.append(text)
     with live_cls(_markdown_renderable(_display_text(text), code_theme, markdown_cls), console=console,
-        auto_refresh=False, transient=False, redirect_stdout=False, redirect_stderr=False) as live:
+        auto_refresh=False, transient=False, redirect_stdout=True, redirect_stderr=False) as live:
         async for chunk in chunks:
             if not chunk: continue
             text += chunk
