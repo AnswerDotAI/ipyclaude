@@ -6,7 +6,7 @@ description: Explains ipyai usage, commands, configuration, and features. Use wh
 
 # ipyai Help
 
-ipyai is an IPython extension that turns any input starting with `` ` `` into an AI prompt.
+ipyai is an IPython extension that turns any input starting with `.` into an AI prompt.
 
 ## Quick Start
 
@@ -16,10 +16,10 @@ Load the extension:
 %load_ext ipyai
 ```
 
-Then type a backtick followed by your prompt:
+Then type a period followed by your prompt:
 
 ```python
-`write a haiku about sqlite
+.write a haiku about sqlite
 ```
 
 ## Commands
@@ -40,7 +40,7 @@ Expose a function as a tool by referencing it with `&`name`` in your prompt:
 ```python
 def weather(city): return f"Sunny in {city}"
 
-`use &`weather` to check Brisbane
+. use `use &`weather` to check Brisbane`weather` to check Brisbane
 ```
 
 With `#|eval: true` as the first line, the code is run when the skill is loaded. For example, after loading this, you can run `is_ipyaiskill_loaded()`:
@@ -72,12 +72,12 @@ Any IPython cell containing only a string literal is treated as a "note". Notes 
 Paste multiple lines or use backslash continuation:
 
 ```python
-`summarize this module:
+. summarize this module:
 focus on state management
 and persistence behavior
 ```
 
 ```python
-`draft a migration plan \
+. draft a migration plan \
 with risks and rollback steps
 ```
