@@ -170,34 +170,31 @@ def test_astream_to_stdout_collects_streamed_text():
     assert out.getvalue() == "ab\n"
 
 
-def test_compact_tool_display_uses_summary_and_truncates_result():
+def test_compact_tool_display_replaces_details_with_summary():
     text = """Before
 
 <details class='tool-usage-details'>
-<summary>f(x=1)</summary>
+<summary>MYSUMMARY</summary>
 
 ```json
-{"id":"toolu_1","call":{"function":"f","arguments":{"x":"1"}},"result":"%s"}
+{"id":"toolu_1","call":{"function":"f","arguments":{}},"result":"ok"}
 ```
 
 </details>
 
-After""" % ("a" * 120)
-
+After"""
     res = compact_tool_display(text)
-    assert "🔧 f(x=1) => " in res
-    assert "a" * 120 not in res
-    assert "..." in res
-    assert "\n\n\n🔧" not in res
-    assert "🔧 f(x=1)" in res
+    assert "🔧 MYSUMMARY" in res
+    assert "<details" not in res
+    assert "Before" in res and "After" in res
 
 
 def test_astream_to_stdout_uses_live_markdown_for_tty_and_returns_full_text():
     tool_block = """<details class='tool-usage-details'>
-<summary>f(x=1)</summary>
+<summary>MYSUMMARY</summary>
 
 ```json
-{"id":"toolu_1","call":{"function":"f","arguments":{"x":"1"}},"result":"2"}
+{"id":"toolu_1","call":{"function":"f","arguments":{}},"result":"ok"}
 ```
 
     </details>"""
@@ -206,8 +203,8 @@ def test_astream_to_stdout_uses_live_markdown_for_tty_and_returns_full_text():
     out = TTYStringIO()
     text = run_stream(tool_block, out=out, console_cls=DummyConsole, markdown_cls=DummyMarkdown, live_cls=DummyLive)
     assert text == tool_block
-    assert out.getvalue() == "RICH:🔧 f(x=1) => 2"
-    assert DummyLive.instances[-1].renderables[-1].text == "🔧 f(x=1) => 2"
+    assert "🔧 MYSUMMARY" in out.getvalue()
+    assert "🔧 MYSUMMARY" in DummyLive.instances[-1].renderables[-1].text
 
 
 def test_astream_to_stdout_uses_rich_markdown_options_for_live_updates():
@@ -233,34 +230,16 @@ def test_astream_to_stdout_updates_live_markdown_as_chunks_arrive():
     assert out.getvalue() == "RICH:ab"
 
 
-def test_patch_inspect_getfile_coerces_pathlike_results_to_str(monkeypatch):
-    monkeypatch.setattr(inspect, "_orig_getfile", lambda obj: Path("/tmp/demo.py"))
-    assert inspect.getfile(object()) == "/tmp/demo.py"
 
 
-def test_patch_syntax_tb_coerces_non_string_msg():
-    calls = []
-
-    class WeirdMsg:
-        def __str__(self): return "coerced"
-
-    tb = SyntaxTB(theme_name="linux")
-    tb._orig_structured_traceback = lambda etype,evalue,etb,tb_offset=None,context=5: calls.append((etype, evalue.msg, etb, tb_offset, context)) or ["ok"]
-    err = SimpleNamespace(msg=WeirdMsg())
-
-    assert tb.structured_traceback(ValueError, err, None, tb_offset=2, context=7) == ["ok"]
-    assert err.msg == "coerced"
-    assert calls == [(ValueError, "coerced", None, 2, 7)]
-
-
-def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
+async def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
     shell,ext = mk_ext()
     ext.load()
     assert shell.input_transformer_manager.cleanup_transforms == [transform_dots]
     assert len(shell.magics) == 1
     assert shell.user_ns[EXTENSION_NS] is ext
 
-    ext.run_prompt("tell me something")
+    await ext.run_prompt("tell me something")
 
     assert dummy_ai.instances[-1].kwargs["hist"] == []
     assert dummy_ai.instances[-1].calls == [(
@@ -277,7 +256,7 @@ def test_extension_load_is_idempotent_and_tracks_last_response(dummy_ai):
 
 
 
-def test_run_prompt_suppresses_ipython_output_history_while_streaming(monkeypatch):
+async def test_run_prompt_suppresses_ipython_output_history_while_streaming(monkeypatch):
     shell,ext = mk_ext(load=False)
     seen = []
 
@@ -288,13 +267,13 @@ def test_run_prompt_suppresses_ipython_output_history_while_streaming(monkeypatc
     monkeypatch.setattr(core, "AsyncChat", DummyAsyncChat)
     monkeypatch.setattr(core, "astream_to_stdout", _fake_astream_to_stdout)
 
-    ext.run_prompt("tell me something")
+    await ext.run_prompt("tell me something")
 
     assert seen == [True]
     assert shell.display_pub._is_publishing is False
 
 
-def test_run_prompt_stores_cleaned_response_for_output_history(monkeypatch):
+async def test_run_prompt_stores_cleaned_response_for_output_history(monkeypatch):
     shell,ext = mk_ext(load=False)
     # Simulate ipythonng extension
     ng = SimpleNamespace(_pty_output=None)
@@ -304,7 +283,7 @@ def test_run_prompt_stores_cleaned_response_for_output_history(monkeypatch):
     monkeypatch.setattr(core, "AsyncChat", DummyAsyncChat)
     monkeypatch.setattr(core, "astream_to_stdout", _fake_astream_to_stdout)
 
-    ext.run_prompt("test")
+    await ext.run_prompt("test")
 
     assert ng._pty_output == "Hello world"
 
@@ -350,11 +329,11 @@ def test_existing_sysp_file_is_loaded():
     assert ext.system_prompt == "custom sysp"
 
 
-def test_config_values_drive_model_think_and_search(dummy_ai):
+async def test_config_values_drive_model_think_and_search(dummy_ai):
     core.CONFIG_PATH.write_text(json.dumps(dict(model="cfg-model", think="m", search="h", log_exact=True)))
     shell,ext = mk_ext()
 
-    ext.run_prompt("tell me something")
+    await ext.run_prompt("tell me something")
 
     assert ext.model == "cfg-model"
     assert ext.think == "m"
@@ -398,12 +377,12 @@ def test_handle_line_can_report_and_set_model(capsys):
     assert capsys.readouterr().out == "self.log_exact=False\n"
 
 
-def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
+async def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
     shell,ext = mk_ext()
 
-    ext.run_prompt("first prompt")
+    await ext.run_prompt("first prompt")
     shell.execution_count = 3
-    ext.run_prompt("second prompt")
+    await ext.run_prompt("second prompt")
 
     assert dummy_ai.instances[1].kwargs["hist"] == [
         "<user-request>first prompt</user-request>",
@@ -413,7 +392,7 @@ def test_second_prompt_uses_sqlite_prompt_history(dummy_ai):
         ("second prompt", "first second")]
 
 
-def test_interrupted_prompt_with_no_output_has_valid_history(dummy_ai):
+async def test_interrupted_prompt_with_no_output_has_valid_history(dummy_ai):
     """When a prompt is interrupted before any output, the saved response should
     still produce a valid assistant message in the history for the next prompt."""
     shell,ext = mk_ext()
@@ -421,7 +400,7 @@ def test_interrupted_prompt_with_no_output_has_valid_history(dummy_ai):
     # Simulate an interrupted prompt that produced no output
     ext.save_prompt("interrupted prompt", "", 1)
     shell.execution_count = 3
-    ext.run_prompt("follow up")
+    await ext.run_prompt("follow up")
 
     # The history sent to the model should have a non-empty assistant message
     hist = dummy_ai.instances[0].kwargs["hist"]
@@ -430,20 +409,20 @@ def test_interrupted_prompt_with_no_output_has_valid_history(dummy_ai):
     assert hist[1] != "", "Empty assistant response in history causes prefill errors"
 
 
-def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
+async def test_second_prompt_replays_prior_context_in_chat_history(dummy_ai):
     shell,ext = mk_ext()
     shell.history_manager.add(1, "print('a')", "a")
     shell.history_manager.add(2, "print(1)", "1")
     shell.history_manager.add(3, "1+1", "2")
     shell.execution_count = 5
 
-    ext.run_prompt("What code history do you see in my session exactly?")
+    await ext.run_prompt("What code history do you see in my session exactly?")
 
     shell.history_manager.add(5, "from IPython.display import HTML,Markdown,Pretty,display")
     shell.history_manager.add(6, "Markdown('A **b** *c*')", "A **b** *c*")
     shell.execution_count = 8
 
-    ext.run_prompt("Do you see the earlier prints etc from the first prompt?")
+    await ext.run_prompt("Do you see the earlier prints etc from the first prompt?")
 
     assert dummy_ai.instances[1].kwargs["hist"] == [
         "<context><code>print('a')</code><output>a</output><code>print(1)</code><output>1</output><code>1+1</code><output>2</output></context>\n"
@@ -609,14 +588,14 @@ def test_save_writes_startup_snapshot(capsys):
         metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
 
 
-def test_log_exact_writes_full_prompt_and_response(dummy_ai):
+async def test_log_exact_writes_full_prompt_and_response(dummy_ai):
     log_path = core.LOG_PATH
     shell = DummyShell()
     shell.history_manager.add(1, "a = 1")
     shell.execution_count = 3
     ext = IPyAIExtension(shell=shell, log_exact=True).load()
 
-    ext.run_prompt("tell me something")
+    await ext.run_prompt("tell me something")
 
     rec = json.loads(log_path.read_text().strip())
     assert rec["session"] == 1
@@ -726,14 +705,14 @@ async def test_load_skill_evals_code_blocks(tmp_path):
     assert shell.user_ns["my_tool"]() == "loaded"
 
 
-def test_run_prompt_includes_skills_tool_and_system_prompt(dummy_ai, tmp_path, monkeypatch):
+async def test_run_prompt_includes_skills_tool_and_system_prompt(dummy_ai, tmp_path, monkeypatch):
     skills_dir = tmp_path / ".agents" / "skills"
     _mk_skill(skills_dir, "test-skill", "A test skill.")
     monkeypatch.setattr(core, "_discover_skills", lambda: _discover_skills(cwd=tmp_path))
     shell,ext = mk_ext()
     assert len(ext.skills) == 1
 
-    ext.run_prompt("hello")
+    await ext.run_prompt("hello")
 
     chat = dummy_ai.instances[-1]
     assert any("load_skill" in str(t) for t in chat.kwargs.get("tools", []))
@@ -819,7 +798,7 @@ def test_pyrun_not_added_when_absent():
     tools, bad = ext.resolve_tools("do something", [])
     assert not any(t.get("function", {}).get("name") == "pyrun" for t in tools)
 
-def test_note_tool_refs_in_resolve(dummy_ai):
+async def test_note_tool_refs_in_resolve(dummy_ai):
     def helper():
         "A helper tool"
         return "ok"
@@ -827,7 +806,7 @@ def test_note_tool_refs_in_resolve(dummy_ai):
     shell.user_ns["helper"] = helper
     shell.history_manager.add(1, '"use &`helper` for this"')
     shell.execution_count = 3
-    ext.run_prompt("do something")
+    await ext.run_prompt("do something")
     chat = dummy_ai.instances[-1]
     assert any("helper" in str(t) for t in (chat.kwargs.get("tools") or []))
 
@@ -863,50 +842,50 @@ def test_format_var_xml():
 def test_format_var_xml_missing_returns_empty():
     assert _format_var_xml({"missing"}, {}) == ""
 
-def test_resolve_tools_missing_tool_not_raised(dummy_ai):
+async def test_resolve_tools_missing_tool_not_raised(dummy_ai):
     shell,ext = mk_ext()
-    ext.run_prompt("call &`nonexistent`")
+    await ext.run_prompt("call &`nonexistent`")
     chat = dummy_ai.instances[-1]
     assert '<warnings>' in chat.calls[0][0]
     assert 'nonexistent' in chat.calls[0][0]
 
-def test_resolve_tools_noncallable_noted(dummy_ai):
+async def test_resolve_tools_noncallable_noted(dummy_ai):
     shell,ext = mk_ext()
     shell.user_ns["x"] = 42
-    ext.run_prompt("call &`x`")
+    await ext.run_prompt("call &`x`")
     chat = dummy_ai.instances[-1]
     assert '<warnings>' in chat.calls[0][0]
     assert 'x' in chat.calls[0][0]
 
-def test_var_in_prompt_adds_variable_xml(dummy_ai):
+async def test_var_in_prompt_adds_variable_xml(dummy_ai):
     shell,ext = mk_ext()
     shell.user_ns["myval"] = 99
-    ext.run_prompt("check $`myval`")
+    await ext.run_prompt("check $`myval`")
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
     assert '<variable name="myval" type="int">99</variable>' in prompt
 
-def test_missing_var_in_prompt_adds_note(dummy_ai):
+async def test_missing_var_in_prompt_adds_note(dummy_ai):
     shell,ext = mk_ext()
-    ext.run_prompt("check $`missing_var`")
+    await ext.run_prompt("check $`missing_var`")
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
     assert '<warnings>' in prompt
     assert 'missing_var' in prompt
 
-def test_mixed_missing_tools_and_vars_in_note(dummy_ai):
+async def test_mixed_missing_tools_and_vars_in_note(dummy_ai):
     shell,ext = mk_ext()
-    ext.run_prompt("use &`bad_tool` and $`bad_var`")
+    await ext.run_prompt("use &`bad_tool` and $`bad_var`")
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
     assert 'bad_tool' in prompt
     assert 'bad_var' in prompt
 
-def test_var_from_history_included(dummy_ai):
+async def test_var_from_history_included(dummy_ai):
     shell,ext = mk_ext()
     shell.user_ns["x"] = 10
-    ext.run_prompt("first prompt with $`x`")
-    ext.run_prompt("second prompt")
+    await ext.run_prompt("first prompt with $`x`")
+    await ext.run_prompt("second prompt")
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
     assert '<variable name="x" type="int">10</variable>' in prompt
@@ -918,7 +897,7 @@ def test_skill_vars_parsed(tmp_path):
     s = _parse_skill(d)
     assert set(s["vars"]) == {"data", "count"}
 
-def test_skill_vars_in_prompt(dummy_ai, tmp_path, monkeypatch):
+async def test_skill_vars_in_prompt(dummy_ai, tmp_path, monkeypatch):
     shell,ext = mk_ext()
     shell.user_ns["data"] = [1, 2, 3]
     d = tmp_path / "my-skill"
@@ -927,7 +906,7 @@ def test_skill_vars_in_prompt(dummy_ai, tmp_path, monkeypatch):
     monkeypatch.setattr(core, "_discover_skills", lambda: [_parse_skill(d)])
     shell2, ext2 = mk_ext()
     shell2.user_ns["data"] = [1, 2, 3]
-    ext2.run_prompt("do something")
+    await ext2.run_prompt("do something")
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
     assert '<variable name="data" type="list">[1, 2, 3]</variable>' in prompt
@@ -962,18 +941,18 @@ def test_run_shell_refs_runs_commands():
 def test_run_shell_refs_empty_for_no_cmds():
     assert _run_shell_refs(set()) == ""
 
-def test_shell_in_prompt_adds_shell_xml(dummy_ai):
+async def test_shell_in_prompt_adds_shell_xml(dummy_ai):
     shell,ext = mk_ext()
-    ext.run_prompt("check !`echo test123`")
+    await ext.run_prompt("check !`echo test123`")
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
     assert '<shell cmd="echo test123">' in prompt
     assert 'test123' in prompt
 
-def test_shell_from_history_included(dummy_ai):
+async def test_shell_from_history_included(dummy_ai):
     shell,ext = mk_ext()
-    ext.run_prompt("first with !`echo aaa`")
-    ext.run_prompt("second prompt")
+    await ext.run_prompt("first with !`echo aaa`")
+    await ext.run_prompt("second prompt")
     chat = dummy_ai.instances[-1]
     prompt = chat.calls[0][0]
     assert '<shell cmd="echo aaa">' in prompt

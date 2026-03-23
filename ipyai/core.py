@@ -4,13 +4,11 @@ from datetime import datetime,timezone
 from pathlib import Path
 from typing import Callable
 
-from fastcore.basics import patch,patch_to
 from fastcore.xdg import xdg_config_home
 from fastcore.xtras import frontmatter
 from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
-from IPython.core.ultratb import SyntaxTB
 from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse,contents
 from rich.console import Console
 from rich.file_proxy import FileProxy
@@ -26,7 +24,6 @@ def _tde_on_text(self, context, text):
     else: self.content.append_text(text)
 TableDataElement.on_text = _tde_on_text
 from toolslm.funccall import get_schema_nm
-from IPython.core.interactiveshell import InteractiveShell
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_THINK = "l"
@@ -270,22 +267,11 @@ def _event_sort_key(o): return o.get("line", 0), 0 if o.get("kind") == "code" el
 
 def _single_line(s: str) -> str: return re.sub(r"\s+", " ", s.strip())
 
-
-def _truncate_short(s: str, mx: int=100) -> str:
-    s = _single_line(s)
-    return s if len(s) <= mx else s[:mx-3] + "..."
-
-
 _tool_pending_re = re.compile(r"\n- ⏳ `(.+?)` ⏳")
 
-def compact_tool_display(text: str, result_chars: int=100) -> str:
-    def _repl(m):
-        summary,payload = m.groups()
-        try: result = json.loads(payload).get("result", "")
-        except Exception: return m.group(0)
-        return f"🔧 {_single_line(summary)} => {_truncate_short(str(result), mx=result_chars)}"
-    text = _tool_block_re.sub(_repl, text)
-    text = _tool_pending_re.sub(lambda m: '' if f"🔧 {m.group(1)} =>" in text else m.group(0), text)
+def compact_tool_display(text: str) -> str:
+    text = _tool_block_re.sub(lambda m: f"🔧 {_single_line(m.group(1))}", text)
+    text = _tool_pending_re.sub(lambda m: '' if f"🔧 {m.group(1)}" in text else m.group(0), text)
     return text
 
 
@@ -508,13 +494,6 @@ async def load_skill(path:str):  # path: Path to the skill directory
     return FullResponse(_eval_block_re.sub('', text))
 
 
-@patch_to(inspect, nm="getfile")
-def _getfile(obj): return str(inspect._orig_getfile(obj))
-
-@patch()
-def structured_traceback(self:SyntaxTB, etype, evalue, etb, tb_offset=None, context=5):
-    if hasattr(evalue, "msg") and not isinstance(evalue.msg, str): evalue.msg = str(evalue.msg)
-    return self._orig_structured_traceback(etype, evalue, etb, tb_offset=tb_offset, context=context)
 
 def _git_repo_root(path):
     "Walk up from `path` looking for `.git`, return repo root or None."
@@ -573,7 +552,7 @@ class AIMagics(Magics):
 
     @cell_magic("ipyai")
     async def ipyai_cell(self, line: str="", cell: str | None=None):
-        await self.ext._run_prompt(cell)
+        await self.ext.run_prompt(cell)
 
 
 class IPyAIExtension:
@@ -938,9 +917,9 @@ class IPyAIExtension:
                 think=lambda: _validate_level("think", clean, self.think), search=lambda: _validate_level("search", clean, self.search),
                 log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
-        return self.run_prompt(line)
+        return print(f"Unknown command: {line!r}. Use %ipyai with no arguments to see available commands.")
 
-    async def _run_prompt(self, prompt: str):
+    async def run_prompt(self, prompt: str):
         prompt = (prompt or "").rstrip("\n")
         if not prompt.strip(): return None
         history_line = self.current_prompt_line()
@@ -989,17 +968,8 @@ class IPyAIExtension:
         self.save_prompt(prompt, text, history_line)
         return None
 
-    def run_prompt(self, prompt: str): return self.shell.loop_runner(self._run_prompt(prompt))
 
 
-@patch()
-async def run_cell_magic(self:InteractiveShell, magic_name, line, cell):
-    result = self._orig_run_cell_magic(magic_name, line, cell)
-    return await result if inspect.iscoroutine(result) else result
-
-def _await_cell_magic(lines):
-    if lines and 'get_ipython().run_cell_magic(' in lines[0]: lines = ['await ' + lines[0]] + lines[1:]
-    return lines
 
 def create_extension(shell=None, resume=None, prompt_mode=False, **kwargs):
     shell = shell or get_ipython()
@@ -1014,8 +984,6 @@ def create_extension(shell=None, resume=None, prompt_mode=False, **kwargs):
     ext = getattr(shell, EXTENSION_ATTR, None)
     if ext is None: ext = IPyAIExtension(shell=shell, prompt_mode=prompt_mode, **kwargs)
     if not ext.loaded: ext.load()
-    lts = shell.input_transformer_manager.line_transforms
-    if not any(getattr(f, '__name__', None) == '_await_cell_magic' for f in lts): lts.append(_await_cell_magic)
     hm = shell.history_manager
     with hm.db: hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
     if not getattr(shell, '_ipyai_atexit', False):
