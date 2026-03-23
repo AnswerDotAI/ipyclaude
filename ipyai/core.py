@@ -9,7 +9,7 @@ from fastcore.xdg import xdg_config_home
 from fastcore.xtras import frontmatter
 from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
-from IPython.core.magic import Magics, line_cell_magic, magics_class
+from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
 from IPython.core.ultratb import SyntaxTB
 from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse,contents
 from rich.console import Console
@@ -568,9 +568,11 @@ class AIMagics(Magics):
         super().__init__(shell)
         self.ext = ext
 
-    @line_cell_magic("ipyai")
-    async def ipyai(self, line: str="", cell: str | None=None):
-        if cell is None: return self.ext.handle_line(line)
+    @line_magic("ipyai")
+    def ipyai_line(self, line: str=""): return self.ext.handle_line(line)
+
+    @cell_magic("ipyai")
+    async def ipyai_cell(self, line: str="", cell: str | None=None):
         await self.ext._run_prompt(cell)
 
 
