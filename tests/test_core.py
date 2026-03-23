@@ -756,17 +756,18 @@ def _mk_tool_response(fn, result_text):
 def test_tool_results_with_allowed_tools():
     assert "helper" in _tool_results(_mk_tool_response("load_skill", "---\\nallowed-tools: helper\\n---\\nbody"))
 
-def test_tool_results_with_eval_true():
-    assert "compute" in _tool_results(_mk_tool_response("myfn", "---\\neval: true\\n---\\nuse &`compute`"))
+def test_tool_results_only_from_load_skill():
+    assert "compute" in _tool_results(_mk_tool_response("load_skill", "---\\neval: true\\n---\\nuse &`compute`"))
+    assert _tool_results(_mk_tool_response("myfn", "---\\neval: true\\n---\\nuse &`compute`")) == set()
 
-def test_tool_results_without_qualifying_frontmatter():
-    assert _tool_results(_mk_tool_response("myfn", "---\\nname: x\\n---\\nuse &`compute`")) == set()
+def test_tool_results_non_load_skill_ignored():
+    assert _tool_results(_mk_tool_response("bash", "---\\nallowed-tools: helper\\n---\\nbody")) == set()
 
-def test_tool_refs_includes_skills_and_notes():
+def test_tool_refs_includes_notes_but_not_unloaded_skills():
     skills = [dict(name="s", path="/s", description="", tools=["analyze"])]
     notes = ["---\nallowed-tools: fmt\n---\nuse &`helper`"]
     refs = _tool_refs("use &`main`", [], skills=skills, notes=notes)
-    assert refs == {"main", "load_skill", "analyze", "fmt", "helper"}
+    assert refs == {"main", "load_skill", "fmt", "helper"}
 
 def test_pyrun_auto_added_to_tools():
     pytest.importorskip("safepyrun")
@@ -797,6 +798,21 @@ def test_pyrun_not_added_when_absent():
     ext = IPyAIExtension(shell=shell).load()
     tools, bad = ext.resolve_tools("do something", [])
     assert not any(t.get("function", {}).get("name") == "pyrun" for t in tools)
+
+async def test_skill_tool_not_available_until_skill_loaded(dummy_ai, monkeypatch):
+    """A callable matching a skill's allowed-tools should not be sent to the API
+    unless the skill has actually been loaded via load_skill."""
+    def my_tool():
+        "A tool"
+        return "I exist"
+    shell,ext = mk_ext()
+    shell.user_ns["my_tool"] = my_tool
+    skills = [dict(name="s", path="/s", description="test", tools=["my_tool"], vars=[], shell_cmds=[])]
+    monkeypatch.setattr(ext, "skills", skills)
+    await ext.run_prompt("hello")
+    chat = dummy_ai.instances[-1]
+    tool_names = [t["function"]["name"] for t in (chat.kwargs.get("tools") or [])]
+    assert "my_tool" not in tool_names, "Skill tool should not be available before skill is loaded"
 
 async def test_note_tool_refs_in_resolve(dummy_ai):
     def helper():

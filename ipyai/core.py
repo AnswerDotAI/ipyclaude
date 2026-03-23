@@ -177,22 +177,21 @@ def _allowed_tools(text):
 
 
 def _tool_results(response):
-    "Extract tool names from qualifying tool results in a stored AI response."
+    "Extract tool names from load_skill results in a stored AI response."
     names = set()
     for m in _tool_block_re.finditer(response or ""):
-        try: result = str(json.loads(m.group(2)).get("result", ""))
+        try: payload = json.loads(m.group(2))
         except Exception: continue
-        fm, _ = frontmatter(result)
-        if fm and (fm.get('allowed-tools') or fm.get('eval')): names |= _allowed_tools(result)
+        if payload.get("call", {}).get("function") != "load_skill": continue
+        result = str(payload.get("result", ""))
+        names |= _allowed_tools(result)
     return names
 
 
 def _tool_refs(prompt, hist, skills=None, notes=None, responses=None):
     names = _tool_names(prompt)
     for o in hist: names |= _tool_names(o["prompt"])
-    if skills:
-        names.add("load_skill")
-        for s in skills: names |= set(s.get("tools") or [])
+    if skills: names.add("load_skill")
     for n in (notes or []): names |= _allowed_tools(n)
     for r in (responses or []): names |= _tool_results(r)
     return names
