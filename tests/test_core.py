@@ -118,7 +118,6 @@ def _config_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(core, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(core, "CONFIG_PATH", cfg_dir/"config.json")
     monkeypatch.setattr(core, "SYSP_PATH", cfg_dir/"sysp.txt")
-    monkeypatch.setattr(core, "STARTUP_PATH", cfg_dir/"startup.ipynb")
     monkeypatch.setattr(core, "LOG_PATH", cfg_dir/"exact-log.jsonl")
     monkeypatch.setattr(core, "_discover_skills", lambda: [])
 
@@ -309,7 +308,6 @@ def test_config_file_is_created_and_loaded():
 
     assert core.CONFIG_PATH.exists()
     assert core.SYSP_PATH.exists()
-    assert core.STARTUP_PATH.exists()
     data = json.loads(core.CONFIG_PATH.read_text())
     assert data["model"] == ext.model
     assert data["think"] == DEFAULT_THINK
@@ -317,7 +315,6 @@ def test_config_file_is_created_and_loaded():
     assert data["code_theme"] == DEFAULT_CODE_THEME
     assert data["log_exact"] == DEFAULT_LOG_EXACT
     assert core.SYSP_PATH.read_text() == DEFAULT_SYSTEM_PROMPT
-    assert json.loads(core.STARTUP_PATH.read_text()) == dict(cells=[], metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
     assert ext.system_prompt == DEFAULT_SYSTEM_PROMPT
 
 
@@ -353,7 +350,7 @@ def test_handle_line_can_report_and_set_model(capsys):
     assert capsys.readouterr().out == (
         f"self.model='old-model'\nself.completion_model='{core.DEFAULT_COMPLETION_MODEL}'\n"
         f"self.think='m'\nself.search='h'\nself.code_theme='github-dark'\nself.log_exact=True\n"
-        f"CONFIG_PATH={core.CONFIG_PATH!r}\nSYSP_PATH={core.SYSP_PATH!r}\nSTARTUP_PATH={core.STARTUP_PATH!r}\n"
+        f"CONFIG_PATH={core.CONFIG_PATH!r}\nSYSP_PATH={core.SYSP_PATH!r}\n"
         f"LOG_PATH={core.LOG_PATH!r}\n")
 
     ext.handle_line("model new-model")
@@ -502,15 +499,16 @@ def test_code_context_uses_note_tag_for_string_literals():
     assert ctx == '<context><note>This is a note</note><code>x = 1</code><note>multi\nline</note></context>\n'
 
 
-def test_save_startup_converts_notes_to_markdown_cells():
+def test_save_notebook_converts_notes_to_markdown_cells(tmp_path):
     shell = DummyShell()
     shell.history_manager.add(1, '"# My note"')
     shell.history_manager.add(2, 'x = 1')
     shell.execution_count = 3
     ext = IPyAIExtension(shell=shell).load()
 
-    ext.save_startup()
-    nb = json.loads(core.STARTUP_PATH.read_text())
+    path, _, _ = ext.save_notebook(tmp_path / "test")
+    assert path.suffix == ".ipynb"
+    nb = json.loads(path.read_text())
     c0 = {k:v for k,v in nb["cells"][0].items() if k != "id"}
     assert c0 == dict(cell_type="markdown", source="# My note",
         metadata=dict(ipyai=dict(kind="code", line=1, source='"# My note"')))
@@ -518,17 +516,18 @@ def test_save_startup_converts_notes_to_markdown_cells():
     assert nb["cells"][1]["source"] == "x = 1"
 
 
-def test_startup_roundtrip_preserves_notes():
+def test_notebook_roundtrip_preserves_notes(tmp_path):
     shell = DummyShell()
     shell.history_manager.add(1, '"a note"')
     shell.history_manager.add(2, 'x = 1')
     shell.execution_count = 3
     ext = IPyAIExtension(shell=shell).load()
-    ext.save_startup()
+    ext.save_notebook(tmp_path / "test")
 
     shell2 = DummyShell()
     shell2.execution_count = 1
     ext2 = IPyAIExtension(shell=shell2).load()
+    ext2.load_notebook(tmp_path / "test")
     assert shell2.ran_cells == [('"a note"', True), ('x = 1', True)]
 
 
@@ -546,15 +545,16 @@ def test_history_context_uses_lines_since_last_prompt_only():
     assert "after = 2" in prompt
 
 
-def test_startup_replays_code_and_restores_prompts():
-    startup_path = core.STARTUP_PATH
+def test_load_notebook_replays_code_and_restores_prompts(tmp_path):
     cells = [dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
         dict(cell_type="markdown", source="hello", metadata=dict(ipyai=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
         dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None)]
-    startup_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)))
+    nb_path = tmp_path / "test.ipynb"
+    nb_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)))
     shell = DummyShell()
     shell.execution_count = 1
     ext = IPyAIExtension(shell=shell).load()
+    ext.load_notebook(nb_path)
 
     assert shell.ran_cells == [("import math", True), ("x = 1", True)]
     assert ext.prompt_rows() == [("hi", "hello")]
@@ -563,8 +563,7 @@ def test_startup_replays_code_and_restores_prompts():
     assert shell.execution_count == 4
 
 
-def test_save_writes_startup_snapshot(capsys):
-    startup_path = core.STARTUP_PATH
+def test_save_writes_notebook(tmp_path, capsys):
     shell = DummyShell()
     shell.history_manager.add(1, "import math")
     shell.history_manager.add(2, ".first prompt")
@@ -573,10 +572,11 @@ def test_save_writes_startup_snapshot(capsys):
     ext = IPyAIExtension(shell=shell).load()
     ext.save_prompt("first prompt", "first response", 1)
 
-    ext.handle_line("save")
+    ext.handle_line(f"save {tmp_path / 'mysession'}")
 
-    assert capsys.readouterr().out == f"Saved 2 code cells and 1 prompts to {startup_path}.\n"
-    nb = json.loads(startup_path.read_text())
+    nb_path = tmp_path / "mysession.ipynb"
+    assert f"Saved 2 code cells and 1 prompts to {nb_path}.\n" in capsys.readouterr().out
+    nb = json.loads(nb_path.read_text())
     assert all("id" in c for c in nb["cells"])
     assert _strip_ids(nb) == dict(
         cells=[

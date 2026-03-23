@@ -71,7 +71,6 @@ LAST_RESPONSE = "_ai_last_response"
 EXTENSION_NS = "_ipyai"
 EXTENSION_ATTR = "_ipyai_extension"
 RESET_LINE_NS = "_ipyai_reset_line"
-STARTUP_APPLIED_NS = "_ipyai_startup_applied"
 PROMPTS_TABLE = "ai_prompts"
 PROMPTS_COLS = ["id", "session", "prompt", "response", "history_line"]
 _PROMPTS_SQL = f"""CREATE TABLE IF NOT EXISTS {PROMPTS_TABLE} (
@@ -93,12 +92,11 @@ def _ensure_prompts_table(db):
 CONFIG_DIR = xdg_config_home()/"ipyai"
 CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
-STARTUP_PATH = CONFIG_DIR/"startup.ipynb"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
 CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 __all__ = """EXTENSION_ATTR EXTENSION_NS LAST_PROMPT LAST_RESPONSE MAGIC_NAME PROMPTS_TABLE RESET_LINE_NS DEFAULT_MODEL DEFAULT_COMPLETION_MODEL IPyAIExtension
-create_extension CONFIG_PATH SYSP_PATH STARTUP_PATH LOG_PATH is_dot_prompt load_ipython_extension
+create_extension CONFIG_PATH SYSP_PATH LOG_PATH is_dot_prompt load_ipython_extension
 prompt_from_lines astream_to_stdout transform_dots unload_ipython_extension""".split()
 
 _prompt_template = """{context}<user-request>{prompt}</user-request>"""
@@ -412,23 +410,13 @@ def _cell_to_event(cell):
             prompt=meta.get("prompt", ""), response=cell.get("source", ""))
 
 
-def _default_startup(): return dict(cells=[], metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
-
-
-def load_startup(path=None) -> dict:
-    path = Path(path or STARTUP_PATH)
-    if path.exists():
-        data = json.loads(path.read_text())
-        if not isinstance(data, dict): raise ValueError(f"Invalid startup format in {path}")
-        if "nbformat" in data:
-            events = [e for c in data.get("cells", []) if (e := _cell_to_event(c)) is not None]
-            return dict(version=int(data.get("metadata", {}).get("ipyai_version", 1)), events=events)
-        events = data.get("events", [])
-        if not isinstance(events, list): raise ValueError(f"Invalid startup events in {path}")
-        return dict(version=int(data.get("version", 1)), events=events)
-    nb = _default_startup()
-    path.write_text(json.dumps(nb, indent=2) + "\n")
-    return dict(version=1, events=[])
+def _load_notebook(path) -> list:
+    "Load events from an ipyai .ipynb file."
+    path = Path(path)
+    if not path.exists(): raise FileNotFoundError(f"Notebook not found: {path}")
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict): raise ValueError(f"Invalid notebook format in {path}")
+    return [e for c in data.get("cells", []) if (e := _cell_to_event(c)) is not None]
 
 
 def _parse_skill(path):
@@ -574,7 +562,6 @@ class IPyAIExtension:
         shell.user_ns.setdefault("ex", ex)
         shell.user_ns.setdefault("sed", sed)
         shell.user_ns.setdefault("doc", doc)
-        load_startup(STARTUP_PATH)
 
     @property
     def history_manager(self): return getattr(self.shell, "history_manager", None)
@@ -584,9 +571,6 @@ class IPyAIExtension:
 
     @property
     def reset_line(self): return self.shell.user_ns.get(RESET_LINE_NS, 0)
-
-    @property
-    def startup_applied(self): return bool(self.shell.user_ns.get(STARTUP_APPLIED_NS, False))
 
     @property
     def db(self):
@@ -679,20 +663,21 @@ class IPyAIExtension:
             events.append(dict(kind="prompt", id=pid, line=history_line+1, history_line=history_line, prompt=prompt, response=response))
         return sorted(events, key=_event_sort_key)
 
-    def save_startup(self) -> tuple[int,int]:
+    def save_notebook(self, path) -> tuple[int,int]:
+        path = Path(path)
+        if path.suffix != '.ipynb': path = path.with_suffix('.ipynb')
         events = [{k:v for k,v in o.items() if k != "id"} for o in self.startup_events()]
         nb = dict(cells=[_event_to_cell(e) for e in events], metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
-        STARTUP_PATH.write_text(json.dumps(nb, indent=2) + "\n")
-        return sum(o["kind"] == "code" for o in events), sum(o["kind"] == "prompt" for o in events)
+        path.write_text(json.dumps(nb, indent=2) + "\n")
+        return path, sum(o["kind"] == "code" for o in events), sum(o["kind"] == "prompt" for o in events)
 
     def _advance_execution_count(self):
         if hasattr(self.shell, "execution_count"): self.shell.execution_count += 1
 
-    def apply_startup(self) -> tuple[int,int]:
-        if self.startup_applied: return 0,0
-        self.shell.user_ns[STARTUP_APPLIED_NS] = True
-        if self.current_prompt_line() > 0 or self.prompt_records(): return 0,0
-        events = load_startup(STARTUP_PATH)["events"]
+    def load_notebook(self, path) -> tuple[int,int]:
+        path = Path(path)
+        if path.suffix != '.ipynb': path = path.with_suffix('.ipynb')
+        events = _load_notebook(path)
         ncode = nprompt = 0
         for o in sorted(events, key=_event_sort_key):
             if o.get("kind") == "code":
@@ -706,7 +691,7 @@ class IPyAIExtension:
                 self.save_prompt(o.get("prompt", ""), o.get("response", ""), history_line)
                 self._advance_execution_count()
                 nprompt += 1
-        return ncode,nprompt
+        return path, ncode, nprompt
 
     def log_exact_exchange(self, prompt: str, response: str):
         if not self.log_exact: return
@@ -836,7 +821,6 @@ class IPyAIExtension:
         setattr(self.shell, EXTENSION_ATTR, self)
         self._register_keybindings()
         self._patch_lexer()
-        self.apply_startup()
         self.loaded = True
         return self
 
@@ -887,22 +871,34 @@ class IPyAIExtension:
         elif hasattr(self, '_orig_prompts'):
             shell.prompts = self._orig_prompts
 
+    def _show_help(self):
+        cmds = [
+            ("(no args)",      "Show current settings"),
+            ("help",           "Show this help"),
+            ("model <name>",   "Set model"),
+            ("think <l|m|h>",  "Set thinking level"),
+            ("search <l|m|h>", "Set search level"),
+            ("prompt",         "Toggle prompt mode"),
+            ("save <file>",    "Save session to .ipynb"),
+            ("load <file>",    "Load session from .ipynb"),
+            ("reset",          "Clear AI prompts from current session"),
+            ("sessions",       "List previous sessions"),
+        ]
+        print("Usage: %ipyai <command>\n")
+        for cmd, desc in cmds: print(f"  {cmd:20s} {desc}")
+
     def handle_line(self, line: str):
         line = line.strip()
         if not line:
             for o in _status_attrs: self._show(o)
             print(f"{CONFIG_PATH=}")
             print(f"{SYSP_PATH=}")
-            print(f"{STARTUP_PATH=}")
             return print(f"{LOG_PATH=}")
         if line in _status_attrs: return self._show(line)
         if line == "prompt": return self._toggle_prompt_mode()
         if line == "reset":
             n = self.reset_session_history()
             return print(f"Deleted {n} AI prompts from session {self.session_number}.")
-        if line == "save":
-            ncode,nprompt = self.save_startup()
-            return print(f"Saved {ncode} code cells and {nprompt} prompts to {STARTUP_PATH}.")
         if line == "sessions":
             rows = _list_sessions(self.db, os.getcwd())
             if not rows: return print("No sessions found for this directory.")
@@ -910,13 +906,24 @@ class IPyAIExtension:
             for sid,start,end,ncmds,remark,lp in rows: print(_fmt_session(sid, start, ncmds, lp))
             return
         cmd,_,arg = line.partition(" ")
-        if arg:
-            clean = arg.strip()
+        clean = arg.strip()
+        if cmd == "save":
+            if not clean: return print("Usage: %ipyai save <filename>")
+            path, ncode, nprompt = self.save_notebook(clean)
+            return print(f"Saved {ncode} code cells and {nprompt} prompts to {path}.")
+        if cmd == "load":
+            if not clean: return print("Usage: %ipyai load <filename>")
+            try:
+                path, ncode, nprompt = self.load_notebook(clean)
+                return print(f"Loaded {ncode} code cells and {nprompt} prompts from {path}.")
+            except FileNotFoundError as e: return print(str(e))
+        if cmd == "help": return self._show_help()
+        if clean:
             vals = dict(model=lambda: clean, completion_model=lambda: clean or DEFAULT_COMPLETION_MODEL, code_theme=lambda: clean or DEFAULT_CODE_THEME,
                 think=lambda: _validate_level("think", clean, self.think), search=lambda: _validate_level("search", clean, self.search),
                 log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
-        return print(f"Unknown command: {line!r}. Use %ipyai with no arguments to see available commands.")
+        return print(f"Unknown command: {line!r}. Run %ipyai help for available commands.")
 
     async def run_prompt(self, prompt: str):
         prompt = (prompt or "").rstrip("\n")
@@ -970,7 +977,7 @@ class IPyAIExtension:
 
 
 
-def create_extension(shell=None, resume=None, prompt_mode=False, **kwargs):
+def create_extension(shell=None, resume=None, load=None, prompt_mode=False, **kwargs):
     shell = shell or get_ipython()
     if shell is None: raise RuntimeError("No active IPython shell found")
     _ensure_prompts_table(shell.history_manager.db)
@@ -983,6 +990,11 @@ def create_extension(shell=None, resume=None, prompt_mode=False, **kwargs):
     ext = getattr(shell, EXTENSION_ATTR, None)
     if ext is None: ext = IPyAIExtension(shell=shell, prompt_mode=prompt_mode, **kwargs)
     if not ext.loaded: ext.load()
+    if load is not None:
+        try:
+            path, ncode, nprompt = ext.load_notebook(load)
+            print(f"Loaded {ncode} code cells and {nprompt} prompts from {path}.")
+        except FileNotFoundError as e: print(str(e))
     hm = shell.history_manager
     with hm.db: hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
     if not getattr(shell, '_ipyai_atexit', False):
@@ -994,6 +1006,7 @@ def create_extension(shell=None, resume=None, prompt_mode=False, **kwargs):
 
 _ng_parser = argparse.ArgumentParser(add_help=False)
 _ng_parser.add_argument('-r', type=int, nargs='?', const=-1, default=None)
+_ng_parser.add_argument('-l', type=str, default=None)
 _ng_parser.add_argument('-p', action='store_true', default=False)
 
 def _parse_ng_flags():
@@ -1004,7 +1017,7 @@ def _parse_ng_flags():
 
 def load_ipython_extension(ipython):
     flags = _parse_ng_flags()
-    return create_extension(ipython, resume=flags.r, prompt_mode=flags.p)
+    return create_extension(ipython, resume=flags.r, load=flags.l, prompt_mode=flags.p)
 
 
 def unload_ipython_extension(ipython):

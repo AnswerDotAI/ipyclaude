@@ -1,7 +1,7 @@
 ---
 name: exhash
 description: Guide for using the exhash verified line-addressed editor. Use when the user asks about exhash commands, exhash syntax, lnhash addressing, or needs help with hash-verified text editing.
-allowed-tools: exhash_file
+allowed-tools: exhash_file,lnhashview_file
 ---
 
 ```python
