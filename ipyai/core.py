@@ -102,7 +102,7 @@ prompt_from_lines astream_to_stdout transform_dots unload_ipython_extension""".s
 _prompt_template = """{context}<user-request>{prompt}</user-request>"""
 _tool_re = re.compile(r"&`(\w+)`")
 _var_re = re.compile(r"\$`(\w+)`")
-_shell_re = re.compile(r"!`([^`]+)`")
+_shell_re = re.compile(r"(?<![\w`])!`([^`]+)`")
 _tool_block_re = re.compile(
     r"<details class='tool-usage-details'>\s*<summary>([^\n]*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>", flags=re.DOTALL)
 _status_attrs = "model completion_model think search code_theme log_exact".split()
@@ -788,7 +788,7 @@ class IPyAIExtension:
         parts.append("</current-input>")
         parts.append("\nReturn ONLY the completion text to insert immediately after the prefix."
             " Do not repeat the prefix or include any explanation.")
-        chat = AsyncChat(model=self.completion_model, sp=_COMPLETION_SP)
+        chat = AsyncChat(model=self.completion_model, sp=_COMPLETION_SP, cache=True)
         res = await chat("\n".join(parts))
         return (contents(res).content or "").strip()
 
