@@ -196,7 +196,7 @@ def test_astream_to_stdout_uses_live_markdown_for_tty_and_returns_full_text():
 {"id":"toolu_1","call":{"function":"f","arguments":{}},"result":"ok"}
 ```
 
-    </details>"""
+</details>"""
     DummyConsole.instances = []
     DummyLive.instances = []
     out = TTYStringIO()

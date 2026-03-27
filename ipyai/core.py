@@ -9,7 +9,7 @@ from fastcore.xtras import frontmatter
 from IPython import get_ipython
 from IPython.core.inputtransformer2 import leading_empty_lines
 from IPython.core.magic import Magics, cell_magic, line_magic, magics_class
-from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse,contents
+from lisette.core import AsyncChat,AsyncStreamFormatter,FullResponse,contents,status_re,re_tools
 from rich.console import Console
 from rich.file_proxy import FileProxy
 from rich.live import Live
@@ -103,8 +103,6 @@ _prompt_template = """{context}<user-request>{prompt}</user-request>"""
 _tool_re = re.compile(r"&`(\w+)`")
 _var_re = re.compile(r"\$`(\w+)`")
 _shell_re = re.compile(r"(?<![\w`])!`([^`]+)`")
-_tool_block_re = re.compile(
-    r"<details class='tool-usage-details'>\s*<summary>([^\n]*?)</summary>\s*```json\s*(.*?)\s*```\s*</details>", flags=re.DOTALL)
 _status_attrs = "model completion_model think search code_theme log_exact".split()
 
 
@@ -177,8 +175,8 @@ def _allowed_tools(text):
 def _tool_results(response):
     "Extract tool names from load_skill results in a stored AI response."
     names = set()
-    for m in _tool_block_re.finditer(response or ""):
-        try: payload = json.loads(m.group(2))
+    for m in re_tools.finditer(response or ""):
+        try: payload = json.loads(m.group(3))
         except Exception: continue
         if payload.get("call", {}).get("function") != "load_skill": continue
         result = str(payload.get("result", ""))
@@ -264,11 +262,9 @@ def _event_sort_key(o): return o.get("line", 0), 0 if o.get("kind") == "code" el
 
 def _single_line(s: str) -> str: return re.sub(r"\s+", " ", s.strip())
 
-_tool_pending_re = re.compile(r"\n- ⏳ `(.+?)` ⏳")
-
 def compact_tool_display(text: str) -> str:
-    text = _tool_block_re.sub(lambda m: f"🔧 {_single_line(m.group(1))}", text)
-    text = _tool_pending_re.sub(lambda m: '' if f"🔧 {m.group(1)}" in text else m.group(0), text)
+    text = re_tools.sub(lambda m: f"🔧 {_single_line(m.group('summary'))}\n", text)
+    text = status_re.sub(lambda m: '' if m.group(1) and f"🔧 <code>{m.group(1)}" in text else m.group(0), text)
     return text
 
 
