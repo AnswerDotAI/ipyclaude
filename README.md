@@ -220,6 +220,10 @@ Config files live under `~/.config/ipyai/` and are created on demand:
 - `completion_model` is the model used for Alt-. inline completions
 - `think` and `search` must be one of `l`, `m`, or `h`
 
+## See Also
+
+[ipycodex](https://github.com/AnswerDotAI/ipycodex) is a sister project with the same interface but backed by the Codex app-server instead of litellm/Anthropic.
+
 ## Development
 
 See [DEV.md](DEV.md) for project layout, architecture, persistence details, and development workflow.

@@ -101,7 +101,7 @@ prompt_from_lines astream_to_stdout transform_dots unload_ipython_extension""".s
 
 _prompt_template = """{context}<user-request>{prompt}</user-request>"""
 _tool_re = re.compile(r"&`(\w+)`")
-_var_re = re.compile(r"\$`(\w+)`")
+_var_re = re.compile(r"\$`(\w+(?:\([^`]*\))?)`")
 _shell_re = re.compile(r"(?<![\w`])!`([^`]+)`")
 _status_attrs = "model completion_model think search code_theme log_exact".split()
 
@@ -215,11 +215,21 @@ def _var_refs(prompt, hist, skills=None, notes=None, responses=None):
     return names
 
 
+_MISSING = object()
+
+def _eval_var(name, ns):
+    if '(' in name:
+        try: ast.parse(name, mode='eval')
+        except SyntaxError: return _MISSING
+        try: return eval(name, ns)
+        except Exception: return _MISSING
+    return ns.get(name, _MISSING)
+
 def _format_var_xml(names, ns):
     parts = []
     for n in sorted(names):
-        if n not in ns: continue
-        v = ns[n]
+        v = _eval_var(n, ns)
+        if v is _MISSING: continue
         parts.append(f'<variable name="{n}" type="{type(v).__name__}">{str(v)}</variable>')
     return "".join(parts)
 
@@ -553,7 +563,7 @@ class IPyAIExtension:
         self.skills = _discover_skills()
         if self.skills: shell.user_ns["load_skill"] = load_skill
         from safecmd import bash, ex, sed
-        from safepyrun import doc
+        from pyskills import doc
         shell.user_ns.setdefault("bash", bash)
         shell.user_ns.setdefault("ex", ex)
         shell.user_ns.setdefault("sed", sed)

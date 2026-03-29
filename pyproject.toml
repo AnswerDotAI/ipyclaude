@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "Jeremy Howard", email = "info@answer.ai"}]
-dependencies = ["fastcore>=1.12.31", "ipython>=9", "lisette>=0.0.47", "rich", "mistletoe", "ipythonng", "safepyrun", "safecmd"]
+dependencies = ["fastcore>=1.12.31", "ipython>=9", "lisette>=0.0.47", "rich", "mistletoe", "ipythonng", "safepyrun", "safecmd", "pyskills"]
 
 [project.scripts]
 ipyai = "ipyai.cli:main"
