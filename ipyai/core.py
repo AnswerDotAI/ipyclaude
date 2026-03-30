@@ -734,12 +734,16 @@ class IPyAIExtension:
         @pt_app.key_bindings.add('escape', 'W')
         def _paste_all(event):
             blocks = _get_blocks()
-            if blocks: event.current_buffer.insert_text('\n'.join(blocks))
+            if blocks:
+                event.current_buffer.insert_text('\n'.join(blocks))
+                if self.prompt_mode: self._toggle_prompt_mode(event)
         for i,ch in enumerate('!@#$%^&*(', 1):
             @pt_app.key_bindings.add('escape', ch)
             def _paste_nth(event, n=i):
                 blocks = _get_blocks()
-                if len(blocks) >= n: event.current_buffer.insert_text(blocks[n-1])
+                if len(blocks) >= n:
+                    event.current_buffer.insert_text(blocks[n-1])
+                    if self.prompt_mode: self._toggle_prompt_mode(event)
         cycle = dict(idx=-1, resp='')
         def _cycle(event, delta):
             resp = ns.get(LAST_RESPONSE, '')
@@ -749,6 +753,7 @@ class IPyAIExtension:
             cycle['idx'] = (cycle['idx'] + delta) % len(blocks)
             from prompt_toolkit.document import Document
             event.current_buffer.document = Document(blocks[cycle['idx']])
+            if self.prompt_mode: self._toggle_prompt_mode(event)
         # prompt_toolkit swaps A/B for modifier-4 (Alt+Shift) arrows
         @pt_app.key_bindings.add('escape', 's-up')   # physical Alt-Shift-Down
         def _cycle_down(event): _cycle(event, 1)
@@ -779,10 +784,15 @@ class IPyAIExtension:
         # Alt-P: toggle prompt mode
         @pt_app.key_bindings.add('escape', 'p')
         def _toggle_prompt(event):
-            self._toggle_prompt_mode()
-            from prompt_toolkit.formatted_text import PygmentsTokens
-            pt_app.message = PygmentsTokens(self.shell.prompts.in_prompt_tokens())
-            event.app.invalidate()
+            self._toggle_prompt_mode(event)
+        # Backspace at start of buffer: toggle prompt mode
+        @pt_app.key_bindings.add('backspace')
+        def _backspace_toggle(event):
+            if (buf := event.current_buffer).cursor_position == 0: self._toggle_prompt_mode(event)
+            else: buf.delete_before_cursor()
+        # Alt-Enter (and Shift-Enter in modern terminals): insert newline instead of submitting
+        @pt_app.key_bindings.add('escape', 'enter')
+        def _alt_enter_newline(event): event.current_buffer.insert_text('\n')
 
     async def _ai_complete(self, document):
         prefix,suffix = document.text_before_cursor,document.text_after_cursor
@@ -846,7 +856,7 @@ class IPyAIExtension:
         setattr(self, attr, value)
         return self._show(attr)
 
-    def _toggle_prompt_mode(self):
+    def _toggle_prompt_mode(self, event=None):
         self.prompt_mode = not self.prompt_mode
         cts = self.shell.input_transformer_manager.cleanup_transforms
         if self.prompt_mode:
@@ -858,8 +868,12 @@ class IPyAIExtension:
                 idx = 1 if cts and cts[0] is leading_empty_lines else 0
                 cts.insert(idx, transform_dots)
         self._swap_prompts()
-        state = "ON" if self.prompt_mode else "OFF"
-        print(f"Prompt mode {state}")
+        if event:
+            from prompt_toolkit.formatted_text import PygmentsTokens
+            pt_app = getattr(self.shell, 'pt_app', None)
+            if pt_app:
+                pt_app.message = PygmentsTokens(self.shell.prompts.in_prompt_tokens())
+                event.app.invalidate()
 
     def _swap_prompts(self):
         from IPython.terminal.prompts import Prompts, Token
