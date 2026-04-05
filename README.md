@@ -1,50 +1,50 @@
-# ipyai
+# ipyclaude
 
-`ipyai` is an IPython extension that turns any input starting with `.` into an AI prompt.
+`ipyclaude` is an IPython extension that turns any input starting with `.` into an AI prompt.
 
 It is aimed at terminal IPython, not notebook frontends.
 
 ## Install
 
 ```bash
-pip install ipyai
+pip install ipyclaude
 ```
 
 ## CLI
 
-`ipyai` provides a standalone command that launches IPython with `ipyai` and `ipythonng` extensions pre-loaded and output history enabled:
+`ipyclaude` provides a standalone command that launches IPython with `ipyclaude` and `ipythonng` extensions pre-loaded and output history enabled:
 
 ```bash
-ipyai
+ipyclaude
 ```
 
 Resume a previous session:
 
 ```bash
-ipyai -r        # interactive session picker
-ipyai -r 43     # resume session 43 directly
+ipyclaude -r        # interactive session picker
+ipyclaude -r 43     # resume session 43 directly
 ```
 
-On exit, `ipyai` prints the session ID so you can resume later.
+On exit, `ipyclaude` prints the session ID so you can resume later.
 
 ## Load As Extension
 
 ```python
-%load_ext ipyai
+%load_ext ipyclaude
 ```
 
 If you change the package in a running shell:
 
 ```python
-%reload_ext ipyai
+%reload_ext ipyclaude
 ```
 
-## How To Auto-Load `ipyai`
+## How To Auto-Load `ipyclaude`
 
 Add this to an `ipython_config.py` file used by terminal `ipython`:
 
 ```python
-c.TerminalIPythonApp.extensions = ["ipyai.core"]
+c.TerminalIPythonApp.extensions = ["ipyclaude.core"]
 ```
 
 Good places for that file include:
@@ -85,7 +85,7 @@ Backslash-Enter continuation in the terminal:
 with risks and rollback steps
 ```
 
-`ipyai` also provides a line and cell magic named `%ipyai` / `%%ipyai`.
+`ipyclaude` also provides a line and cell magic named `%ipyclaude` / `%%ipyclaude`.
 
 Note: `.01 * 3` and similar expressions starting with `.` followed by a digit will be interpreted as prompts. Write `0.01 * 3` instead.
 
@@ -99,25 +99,25 @@ Any IPython cell containing only a string literal is treated as a "note". Notes 
 
 Notes appear in the AI context as `<note>` blocks rather than `<code>` blocks. When saving a session, notes are stored as markdown cells in the startup notebook.
 
-## `%ipyai` Commands
+## `%ipyclaude` Commands
 
 ```python
-%ipyai
-%ipyai model claude-sonnet-4-6
-%ipyai completion_model claude-haiku-4-5-20251001
-%ipyai think m
-%ipyai search h
-%ipyai code_theme monokai
-%ipyai log_exact true
-%ipyai save
-%ipyai reset
+%ipyclaude
+%ipyclaude model claude-sonnet-4-6
+%ipyclaude completion_model claude-haiku-4-5-20251001
+%ipyclaude think m
+%ipyclaude search h
+%ipyclaude code_theme monokai
+%ipyclaude log_exact true
+%ipyclaude save
+%ipyclaude reset
 ```
 
-- `%ipyai` — show current settings and config file paths
-- `%ipyai model ...` / `completion_model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
-- `%ipyai save` — save the current session (code, notes, and AI history) to `startup.ipynb`
-- `%ipyai reset` — clear AI prompt history for the current session
-- `%ipyai sessions` — list resumable sessions for the current directory (falls back to git repo root)
+- `%ipyclaude` — show current settings and config file paths
+- `%ipyclaude model ...` / `completion_model ...` / `think ...` / `search ...` / `code_theme ...` / `log_exact ...` — change settings for the current session
+- `%ipyclaude save` — save the current session (code, notes, and AI history) to `startup.ipynb`
+- `%ipyclaude reset` — clear AI prompt history for the current session
+- `%ipyclaude sessions` — list resumable sessions for the current directory (falls back to git repo root)
 
 ## Tools
 
@@ -141,7 +141,7 @@ All discovered tools that exist as callables in the IPython namespace are includ
 
 ## Skills
 
-`ipyai` supports [Agent Skills](https://agentskills.io/) — reusable instruction sets that the AI can load on demand. Skills are discovered at extension load time from:
+`ipyclaude` supports [Agent Skills](https://agentskills.io/) — reusable instruction sets that the AI can load on demand. Skills are discovered at extension load time from:
 
 - `.agents/skills/` in the current directory and every parent directory
 - `~/.config/agents/skills/`
@@ -165,7 +165,7 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 
 ## Keyboard Shortcuts
 
-`ipyai` registers prompt_toolkit keybindings:
+`ipyclaude` registers prompt_toolkit keybindings:
 
 | Shortcut | Action |
 |---|---|
@@ -177,16 +177,16 @@ See the [Agent Skills specification](https://agentskills.io/specification.md) fo
 
 Code blocks are extracted from fenced markdown blocks tagged as `python` or `py`. Blocks tagged with other languages (bash, json, etc.) or untagged blocks are skipped.
 
-Syntax highlighting is disabled while typing `.` prompts and `%%ipyai` cells so natural language isn't coloured as Python.
+Syntax highlighting is disabled while typing `.` prompts and `%%ipyclaude` cells so natural language isn't coloured as Python.
 
 ## Startup Replay
 
-`%ipyai save` snapshots the current session to `~/.config/ipyai/startup.ipynb`:
+`%ipyclaude save` snapshots the current session to `~/.config/ipyclaude/startup.ipynb`:
 
 - code cells are saved as code cells (notes become markdown cells)
 - AI prompts are saved with the response as markdown and the prompt in cell metadata
 
-When `ipyai` loads into a fresh session, saved code is replayed and saved prompts are restored into the conversation history. This primes new sessions with imports, helpers, tools, and prior AI context without re-running the prompts.
+When `ipyclaude` loads into a fresh session, saved code is replayed and saved prompts are restored into the conversation history. This primes new sessions with imports, helpers, tools, and prior AI context without re-running the prompts.
 
 ## Output Rendering
 
@@ -194,7 +194,7 @@ Responses are streamed and rendered as markdown in the terminal via Rich. Thinki
 
 ## Configuration
 
-Config files live under `~/.config/ipyai/` and are created on demand:
+Config files live under `~/.config/ipyclaude/` and are created on demand:
 
 | File | Purpose |
 |---|---|

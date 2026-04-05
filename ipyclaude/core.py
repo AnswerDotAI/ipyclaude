@@ -35,7 +35,7 @@ DEFAULT_COMPLETION_MODEL = "claude-haiku-4-5-20251001"
 _COMPLETION_SP = "You are a code completion engine for IPython. Return ONLY the completion text that should be inserted at the cursor position. No explanation, no markdown, no code fences, no prefix repetition."
 DEFAULT_SYSTEM_PROMPT = """You are an AI assistant running inside IPython.
 
-The user interacts with you through `ipyai`, an IPython extension that turns input starting with a period into an AI prompt.
+The user interacts with you through `ipyclaude`, an IPython extension that turns input starting with a period into an AI prompt.
 
 You may receive:
 - a `<context>` XML block containing recent IPython code, outputs, and notes
@@ -65,7 +65,7 @@ If a `<skills>` section is appended to this system prompt, it lists available sk
 
 Assume you are helping an interactive Python user. Prefer concise, accurate, practical responses. When writing code, default to Python unless the user asks for something else.
 """
-MAGIC_NAME = "ipyai"
+MAGIC_NAME = "ipyclaude"
 LAST_PROMPT = "_ai_last_prompt"
 LAST_RESPONSE = "_ai_last_response"
 EXTENSION_NS = "_ipyai"
@@ -89,7 +89,7 @@ def _ensure_prompts_table(db):
             db.execute(f"DROP TABLE {PROMPTS_TABLE}")
             db.execute(_PROMPTS_SQL)
         db.execute(f"CREATE INDEX IF NOT EXISTS idx_{PROMPTS_TABLE}_session_id ON {PROMPTS_TABLE} (session, id)")
-CONFIG_DIR = xdg_config_home()/"ipyai"
+CONFIG_DIR = xdg_config_home()/"ipyclaude"
 CONFIG_PATH = CONFIG_DIR/"config.json"
 SYSP_PATH = CONFIG_DIR/"sysp.txt"
 LOG_PATH = CONFIG_DIR/"exact-log.jsonl"
@@ -146,7 +146,7 @@ def _tag(name: str, content="", **attrs) -> str:
 
 def _is_ipyai_input(source: str) -> bool:
     src = source.lstrip()
-    return src.startswith(".") or src.startswith("%ipyai") or src.startswith("%%ipyai")
+    return src.startswith(".") or src.startswith("%ipyclaude") or src.startswith("%%ipyclaude")
 
 
 def _is_note(source):
@@ -397,16 +397,16 @@ def _event_to_cell(o):
         source = o.get("source", "")
         if _is_note(source):
             return dict(id=_cell_id(), cell_type="markdown", source=_note_str(source),
-                metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0), source=source)))
-        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyai=dict(kind="code", line=o.get("line", 0))),
+                metadata=dict(ipyclaude=dict(kind="code", line=o.get("line", 0), source=source)))
+        return dict(id=_cell_id(), cell_type="code", source=source, metadata=dict(ipyclaude=dict(kind="code", line=o.get("line", 0))),
             outputs=[], execution_count=None)
     if o.get("kind") == "prompt":
         meta = dict(kind="prompt", line=o.get("line", 0), history_line=o.get("history_line", 0), prompt=o.get("prompt", ""))
-        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""), metadata=dict(ipyai=meta))
+        return dict(id=_cell_id(), cell_type="markdown", source=o.get("response", ""), metadata=dict(ipyclaude=meta))
 
 
 def _cell_to_event(cell):
-    meta = cell.get("metadata", {}).get("ipyai", {})
+    meta = cell.get("metadata", {}).get("ipyclaude", {})
     kind = meta.get("kind")
     if kind == "code":
         source = meta.get("source") or cell.get("source", "")
@@ -417,7 +417,7 @@ def _cell_to_event(cell):
 
 
 def _load_notebook(path) -> list:
-    "Load events from an ipyai .ipynb file."
+    "Load events from an ipyclaude .ipynb file."
     path = Path(path)
     if not path.exists(): raise FileNotFoundError(f"Notebook not found: {path}")
     data = json.loads(path.read_text())
@@ -540,10 +540,10 @@ class AIMagics(Magics):
         super().__init__(shell)
         self.ext = ext
 
-    @line_magic("ipyai")
+    @line_magic("ipyclaude")
     def ipyai_line(self, line: str=""): return self.ext.handle_line(line)
 
-    @cell_magic("ipyai")
+    @cell_magic("ipyclaude")
     async def ipyai_cell(self, line: str="", cell: str | None=None):
         await self.ext.run_prompt(cell)
 
@@ -807,7 +807,7 @@ class IPyAIExtension:
         def _lex_document(self, document):
             text = document.text.lstrip()
             if ext.prompt_mode and not text.startswith((';', '!', '%')): return _plain.lex_document(document)
-            if text.startswith('.') or text.startswith('%%ipyai'): return _plain.lex_document(document)
+            if text.startswith('.') or text.startswith('%%ipyclaude'): return _plain.lex_document(document)
             return _orig(self, document)
         IPythonPTLexer.lex_document = _lex_document
 
@@ -890,7 +890,7 @@ class IPyAIExtension:
             ("reset",          "Clear AI prompts from current session"),
             ("sessions",       "List previous sessions"),
         ]
-        print("Usage: %ipyai <command>\n")
+        print("Usage: %ipyclaude <command>\n")
         for cmd, desc in cmds: print(f"  {cmd:20s} {desc}")
 
     def handle_line(self, line: str):
@@ -914,11 +914,11 @@ class IPyAIExtension:
         cmd,_,arg = line.partition(" ")
         clean = arg.strip()
         if cmd == "save":
-            if not clean: return print("Usage: %ipyai save <filename>")
+            if not clean: return print("Usage: %ipyclaude save <filename>")
             path, ncode, nprompt = self.save_notebook(clean)
             return print(f"Saved {ncode} code cells and {nprompt} prompts to {path}.")
         if cmd == "load":
-            if not clean: return print("Usage: %ipyai load <filename>")
+            if not clean: return print("Usage: %ipyclaude load <filename>")
             try:
                 path, ncode, nprompt = self.load_notebook(clean)
                 return print(f"Loaded {ncode} code cells and {nprompt} prompts from {path}.")
@@ -929,7 +929,7 @@ class IPyAIExtension:
                 think=lambda: _validate_level("think", clean, self.think), search=lambda: _validate_level("search", clean, self.search),
                 log_exact=lambda: _validate_bool("log_exact", clean, self.log_exact))
             if cmd in vals: return self._set(cmd, vals[cmd]())
-        return print(f"Unknown command: {line!r}. Run %ipyai help for available commands.")
+        return print(f"Unknown command: {line!r}. Run %ipyclaude help for available commands.")
 
     async def run_prompt(self, prompt: str):
         prompt = (prompt or "").rstrip("\n")
@@ -1005,7 +1005,7 @@ def create_extension(shell=None, resume=None, load=None, prompt_mode=False, **kw
     with hm.db: hm.db.execute("UPDATE sessions SET remark=? WHERE session=?", (os.getcwd(), hm.session_number))
     if not getattr(shell, '_ipyai_atexit', False):
         sid = hm.session_number
-        atexit.register(lambda: print(f"\nTo resume: ipyai -r {sid}"))
+        atexit.register(lambda: print(f"\nTo resume: ipyclaude -r {sid}"))
         shell._ipyai_atexit = True
     return ext
 

@@ -3,7 +3,7 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ipyai"
+name = "ipyclaude"
 dynamic = ["version"]
 description = "Minimal IPython backtick-to-AI extension"
 readme = "README.md"
@@ -12,20 +12,17 @@ license = {text = "Apache-2.0"}
 authors = [{name = "Jeremy Howard", email = "info@answer.ai"}]
 dependencies = ["fastcore>=1.12.31", "ipython>=9", "lisette>=0.0.47", "rich", "mistletoe", "ipythonng", "safepyrun", "safecmd", "pyskills"]
 
-[project.scripts]
-ipyai = "ipyai.cli:main"
-
 [project.urls]
-Source = "https://github.com/answerdotai/ipyai"
+Source = "https://github.com/answerdotai/ipyclaude"
 
 [project.optional-dependencies]
 dev = ["build>=1.0.0", "fastship>=0.0.6", "pytest", "pytest-asyncio", "twine>=5.0.0"]
 
 [tool.setuptools.dynamic]
-version = {attr = "ipyai.__version__"}
+version = {attr = "ipyclaude.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["ipyai*"]
+include = ["ipyclaude*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

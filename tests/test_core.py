@@ -6,8 +6,8 @@ import pytest
 from IPython.core.inputtransformer2 import TransformerManager
 from IPython.core.ultratb import SyntaxTB
 
-import ipyai.core as core
-from ipyai.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
+import ipyclaude.core as core
+from ipyclaude.core import (EXTENSION_NS, LAST_PROMPT, LAST_RESPONSE, RESET_LINE_NS,
     DEFAULT_CODE_THEME, DEFAULT_LOG_EXACT, DEFAULT_SEARCH, DEFAULT_SYSTEM_PROMPT, DEFAULT_THINK,
     IPyAIExtension, astream_to_stdout, compact_tool_display, prompt_from_lines, transform_dots,
     _parse_skill, _allowed_tools, _tool_results, _tool_refs,
@@ -113,7 +113,7 @@ class DummyShell:
 
 @pytest.fixture(autouse=True)
 def _config_paths(monkeypatch, tmp_path):
-    cfg_dir = tmp_path/"ipyai"
+    cfg_dir = tmp_path/"ipyclaude"
     cfg_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(core, "CONFIG_DIR", cfg_dir)
     monkeypatch.setattr(core, "CONFIG_PATH", cfg_dir/"config.json")
@@ -143,7 +143,7 @@ def test_transform_dots_executes_ai_magic_call():
         def run_cell_magic(self, magic, line, cell): seen.update(magic=magic, line=line, cell=cell)
     code = "".join(transform_dots([".hello\n", "world\n"]))
     exec(code, {"get_ipython": lambda: DummyIPython()})
-    assert seen == dict(magic="ipyai", line="", cell="hello\nworld\n")
+    assert seen == dict(magic="ipyclaude", line="", cell="hello\nworld\n")
 
 
 async def _chunks(*items):
@@ -511,7 +511,7 @@ def test_save_notebook_converts_notes_to_markdown_cells(tmp_path):
     nb = json.loads(path.read_text())
     c0 = {k:v for k,v in nb["cells"][0].items() if k != "id"}
     assert c0 == dict(cell_type="markdown", source="# My note",
-        metadata=dict(ipyai=dict(kind="code", line=1, source='"# My note"')))
+        metadata=dict(ipyclaude=dict(kind="code", line=1, source='"# My note"')))
     assert nb["cells"][1]["cell_type"] == "code"
     assert nb["cells"][1]["source"] == "x = 1"
 
@@ -546,9 +546,9 @@ def test_history_context_uses_lines_since_last_prompt_only():
 
 
 def test_load_notebook_replays_code_and_restores_prompts(tmp_path):
-    cells = [dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
-        dict(cell_type="markdown", source="hello", metadata=dict(ipyai=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
-        dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None)]
+    cells = [dict(cell_type="code", source="import math", metadata=dict(ipyclaude=dict(kind="code", line=1)), outputs=[], execution_count=None),
+        dict(cell_type="markdown", source="hello", metadata=dict(ipyclaude=dict(kind="prompt", line=3, history_line=2, prompt="hi"))),
+        dict(cell_type="code", source="x = 1", metadata=dict(ipyclaude=dict(kind="code", line=3)), outputs=[], execution_count=None)]
     nb_path = tmp_path / "test.ipynb"
     nb_path.write_text(json.dumps(dict(cells=cells, metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)))
     shell = DummyShell()
@@ -580,10 +580,10 @@ def test_save_writes_notebook(tmp_path, capsys):
     assert all("id" in c for c in nb["cells"])
     assert _strip_ids(nb) == dict(
         cells=[
-            dict(cell_type="code", source="import math", metadata=dict(ipyai=dict(kind="code", line=1)), outputs=[], execution_count=None),
+            dict(cell_type="code", source="import math", metadata=dict(ipyclaude=dict(kind="code", line=1)), outputs=[], execution_count=None),
             dict(cell_type="markdown", source="first response",
-                metadata=dict(ipyai=dict(kind="prompt", line=2, history_line=1, prompt="first prompt"))),
-            dict(cell_type="code", source="x = 1", metadata=dict(ipyai=dict(kind="code", line=3)), outputs=[], execution_count=None),
+                metadata=dict(ipyclaude=dict(kind="prompt", line=2, history_line=1, prompt="first prompt"))),
+            dict(cell_type="code", source="x = 1", metadata=dict(ipyclaude=dict(kind="code", line=3)), outputs=[], execution_count=None),
         ],
         metadata=dict(ipyai_version=1), nbformat=4, nbformat_minor=5)
 
@@ -608,7 +608,7 @@ def test_cleanup_transform_prevents_help_syntax_interference():
     tm.cleanup_transforms.insert(1, transform_dots)
 
     code = tm.transform_cell(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?")
-    assert code == "get_ipython().run_cell_magic('ipyai', '', 'I am testing my new AI prompt system.\\nTell me do you see a newline in this prompt?\\n')\n"
+    assert code == "get_ipython().run_cell_magic('ipyclaude', '', 'I am testing my new AI prompt system.\\nTell me do you see a newline in this prompt?\\n')\n"
     assert tm.check_complete(".I am testing my new AI prompt system.\\") == ("incomplete", 0)
     assert tm.check_complete(".I am testing my new AI prompt system.\\\nTell me do you see a newline in this prompt?") == ("complete", None)
 
@@ -990,7 +990,7 @@ def test_sysprompt_mentions_variables_and_shell():
 def test_prompt_mode_wraps_input_as_magic():
     lines = transform_prompt_mode(["hello world\n"])
     assert "run_cell_magic" in lines[0]
-    assert "ipyai" in lines[0]
+    assert "ipyclaude" in lines[0]
     assert "hello world" in lines[0]
 
 def test_prompt_mode_passes_through_semicolon_as_python():
@@ -1192,14 +1192,14 @@ def test_handle_line_sessions(dummy_ai):
 
 
 def test_e2e_ipyai_session(tmp_path):
-    "E2E: drive ipyai interactively via pexpect — prompt, response, session lifecycle."
+    "E2E: drive ipyclaude interactively via pexpect — prompt, response, session lifecycle."
     import pexpect
     hist_file = str(tmp_path / "hist.sqlite")
     env = {k: v for k, v in os.environ.items() if k != 'IPYTHONNG_FLAGS'}
     env['XDG_CONFIG_HOME'] = str(tmp_path / "config")
     env['IPYTHON_DIR'] = str(tmp_path / "ipython")
 
-    args = ['-m', 'IPython', '--ext', 'ipyai', f'--HistoryManager.hist_file={hist_file}',
+    args = ['-m', 'IPython', '--ext', 'ipyclaude', f'--HistoryManager.hist_file={hist_file}',
         '--TerminalIPythonApp.display_banner=False', '--colors=NoColor']
     child = pexpect.spawn(sys.executable, args, env=env, timeout=60, encoding='utf-8')
 
@@ -1219,8 +1219,8 @@ def test_e2e_ipyai_session(tmp_path):
     # Wait for next prompt (AI response finished)
     wait_prompt(3)
 
-    # Check %ipyai sessions lists something
-    child.sendline('%ipyai sessions')
+    # Check %ipyclaude sessions lists something
+    child.sendline('%ipyclaude sessions')
     wait_prompt(4)
 
     # Exit and check for resume message

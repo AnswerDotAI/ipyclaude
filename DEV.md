@@ -1,6 +1,6 @@
 # DEV
 
-This project is small. Nearly all runtime behavior lives in [ipyai/core.py](ipyai/core.py), so getting productive mainly means understanding that file and the tests in [tests/test_core.py](tests/test_core.py).
+This project is small. Nearly all runtime behavior lives in [ipyclaude/core.py](ipyclaude/core.py), so getting productive mainly means understanding that file and the tests in [tests/test_core.py](tests/test_core.py).
 
 ## Setup
 
@@ -47,23 +47,23 @@ Implemented:
 - AI inline completion via Alt-. (calls `completion_model` with session context, shows as prompt_toolkit suggestion; partial accept via M-f preserves remaining suggestion)
 - keyboard shortcuts: Alt-Up/Down (history jump), Alt-Shift-W (all code blocks), Alt-Shift-1..9 (nth block), Alt-Shift-Up/Down (cycle blocks) via prompt_toolkit
 - code block extraction uses `mistletoe` markdown parser (not regex) for correctness
-- syntax highlighting disabled for `.` prompts and `%%ipyai` cells (patches `IPythonPTLexer` at class level)
+- syntax highlighting disabled for `.` prompts and `%%ipyclaude` cells (patches `IPythonPTLexer` at class level)
 - XDG-backed config, startup, and system prompt files
 - optional exact raw prompt/response logging
 - skill eval blocks: `#| eval: true` python code blocks in skills are executed via `shell.run_cell` when loaded
 - per-directory session persistence: CWD stored in IPython `sessions.remark`, session resume via `resume_session()`
-- interactive session picker via `prompt_toolkit.radiolist_dialog` for `ipyai -r`
-- `%ipyai sessions` command listing resumable sessions with last prompt preview
-- `ipyai` CLI entry point (console script) launching IPython with ipythonng + ipyai + output history
+- interactive session picker via `prompt_toolkit.radiolist_dialog` for `ipyclaude -r`
+- `%ipyclaude sessions` command listing resumable sessions with last prompt preview
+- `ipyclaude` CLI entry point (console script) launching IPython with ipythonng + ipyclaude + output history
 - minimal IPython compatibility patches for `SyntaxTB` and `inspect.getfile` (guarded with `once=True` to coexist with ipykernel_helper)
 
 ## File Map
 
-- [ipyai/core.py](ipyai/core.py): extension logic, XDG path globals, config loading, prompt/history building, tool resolution, skill discovery, session persistence/resume, async streaming, Rich rendering, keybindings
-- [ipyai/cli.py](ipyai/cli.py): `ipyai` console script entry point — parses flags via `ipythonng.cli.parse_flags`, launches IPython with extensions and output history
-- [ipyai/__init__.py](ipyai/__init__.py): package exports and version
+- [ipyclaude/core.py](ipyclaude/core.py): extension logic, XDG path globals, config loading, prompt/history building, tool resolution, skill discovery, session persistence/resume, async streaming, Rich rendering, keybindings
+- [ipyclaude/cli.py](ipyclaude/cli.py): `ipyclaude` console script entry point — parses flags via `ipythonng.cli.parse_flags`, launches IPython with extensions and output history
+- [ipyclaude/__init__.py](ipyclaude/__init__.py): package exports and version
 - [tests/test_core.py](tests/test_core.py): focused unit tests for transformation, history, config, tools, notes, skills, sessions, rendering, and thinking display
-- [pyproject.toml](pyproject.toml): packaging, console script (`ipyai`), and fastship configuration
+- [pyproject.toml](pyproject.toml): packaging, console script (`ipyclaude`), and fastship configuration
 - [.agents/skills/](/.agents/skills/): project-local Agent Skills
 
 ## Prompt History And Context
@@ -90,17 +90,17 @@ The stored rows are roughly:
 - first prompt: `history_line=1`
 - second prompt: `history_line=3`
 
-So for the second prompt, `ipyai` knows:
+So for the second prompt, `ipyclaude` knows:
 
 - the code context before it should include `x = 1`, but not `import math`
 - the prompt itself happened immediately after line 3
 
-For each new prompt, `ipyai` reconstructs chat history as alternating user / assistant entries:
+For each new prompt, `ipyclaude` reconstructs chat history as alternating user / assistant entries:
 
 - the user entry is `<context>...</context><user-request>...</user-request>`
 - the assistant entry is the stored full response
 
-The `<context>` block contains all non-`ipyai` code run since the previous AI prompt in the current session, plus `Out[...]` history when IPython has it. String-literal-only cells are sent as `<note>` instead of `<code>` (detected via `ast`). The XML is intentionally simple:
+The `<context>` block contains all non-`ipyclaude` code run since the previous AI prompt in the current session, plus `Out[...]` history when IPython has it. String-literal-only cells are sent as `<note>` instead of `<code>` (detected via `ast`). The XML is intentionally simple:
 
 ```xml
 <context><code>a = 1</code><note>This is a note</note><code>a</code><output>1</output></context>
@@ -110,15 +110,15 @@ The `<context>` block contains all non-`ipyai` code run since the previous AI pr
 
 The extension lifecycle is:
 
-1. `%load_ext ipyai` calls `load_ipython_extension`, which parses `IPYTHONNG_FLAGS` and delegates to `create_extension`.
+1. `%load_ext ipyclaude` calls `load_ipython_extension`, which parses `IPYTHONNG_FLAGS` and delegates to `create_extension`.
 2. `create_extension` ensures the `ai_prompts` table exists, optionally resumes a session (or shows the interactive picker), creates the extension, stores CWD in `sessions.remark`, and registers the atexit handler.
 3. `IPyAIExtension.__init__` loads config, system prompt, discovers skills, and loads the startup file.
-4. `IPyAIExtension.load()` registers `%ipyai` / `%%ipyai`, inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`, registers keybindings, and applies `startup.ipynb` if the session is still fresh.
-4. Any cell whose first character is `.` is rewritten by `transform_dots()` into `get_ipython().run_cell_magic('ipyai', '', prompt)`.
-5. `AIMagics.ipyai()` routes line input to `handle_line()` and cell input directly to the `_run_prompt()` coroutine (returned to the async `run_cell_magic` patch for awaiting).
+4. `IPyAIExtension.load()` registers `%ipyclaude` / `%%ipyclaude`, inserts a cleanup transform into IPython's `input_transformer_manager.cleanup_transforms`, registers keybindings, and applies `startup.ipynb` if the session is still fresh.
+4. Any cell whose first character is `.` is rewritten by `transform_dots()` into `get_ipython().run_cell_magic('ipyclaude', '', prompt)`.
+5. `AIMagics.ipyclaude()` routes line input to `handle_line()` and cell input directly to the `_run_prompt()` coroutine (returned to the async `run_cell_magic` patch for awaiting).
 6. `_run_prompt()` reconstructs conversation history, resolves tools, adds skills tools/system prompt if skills were discovered, runs `lisette.AsyncChat`, streams the response, optionally writes an exact log entry, and stores the full response.
 
-At import time, `ipyai` also applies two small global IPython bugfixes (shared with `ipykernel_helper`, guarded with `once=True` so only the first loader applies them):
+At import time, `ipyclaude` also applies two small global IPython bugfixes (shared with `ipykernel_helper`, guarded with `once=True` so only the first loader applies them):
 
 - `SyntaxTB.structured_traceback` coerces non-string `evalue.msg` values to `str`
 - `inspect.getfile` is wrapped to always return a string
@@ -151,7 +151,7 @@ Important detail: only the raw prompt and raw response are stored in SQLite. Con
 
 ## SQLite Storage
 
-`ipyai` uses IPython's existing history database connection at `shell.history_manager.db`.
+`ipyclaude` uses IPython's existing history database connection at `shell.history_manager.db`.
 
 Table schema:
 
@@ -169,18 +169,18 @@ Notes:
 
 - rows are scoped by IPython `session_number`
 - `history_line` is used to decide which code cells belong in the next prompt's generated `<context>` block
-- if `ai_prompts` does not match the expected schema, `ipyai` drops and recreates it instead of migrating it
-- `%ipyai reset` deletes only current-session rows and sets a reset baseline in `user_ns`
+- if `ai_prompts` does not match the expected schema, `ipyclaude` drops and recreates it instead of migrating it
+- `%ipyclaude reset` deletes only current-session rows and sets a reset baseline in `user_ns`
 
 ## Startup Snapshot
 
 `startup.ipynb` is stored as a Jupyter notebook (nbformat v4.5 with cell IDs) next to the other XDG files.
 
-`%ipyai save` writes a merged event stream for the current session as notebook cells:
+`%ipyclaude save` writes a merged event stream for the current session as notebook cells:
 
-- code events become code cells (with `metadata.ipyai.kind="code"`)
-- string-literal-only code (notes) become markdown cells (with original source preserved in `metadata.ipyai.source` for round-trip replay)
-- prompt events become markdown cells containing the AI response (with prompt text in `metadata.ipyai.prompt`)
+- code events become code cells (with `metadata.ipyclaude.kind="code"`)
+- string-literal-only code (notes) become markdown cells (with original source preserved in `metadata.ipyclaude.source` for round-trip replay)
+- prompt events become markdown cells containing the AI response (with prompt text in `metadata.ipyclaude.prompt`)
 
 On a fresh load:
 
@@ -192,16 +192,16 @@ Legacy `startup.json` files (pre-notebook format) are still supported for loadin
 
 ## Session Persistence And Resume
 
-`ipyai` stores the working directory in IPython's `sessions.remark` column (an unused TEXT field) at extension load time. This enables per-directory session listing and resume.
+`ipyclaude` stores the working directory in IPython's `sessions.remark` column (an unused TEXT field) at extension load time. This enables per-directory session listing and resume.
 
 Key functions:
 
 - `_list_sessions(db, cwd)` — queries sessions for the given directory, falls back to git repo root exact match; includes the last AI prompt per session via a subquery on `ai_prompts`
-- `_fmt_session()` — formats a session row for display (shared by `%ipyai sessions` and the interactive picker)
+- `_fmt_session()` — formats a session row for display (shared by `%ipyclaude sessions` and the interactive picker)
 - `_pick_session(rows)` — interactive `radiolist_dialog` picker from prompt_toolkit
 - `resume_session(shell, session_id)` — deletes the fresh session row, restores `session_number` and `execution_count`, pads `input_hist_parsed`/`input_hist_raw`, reopens the old session (clears `end` timestamp)
 
-Resume is triggered by `IPYTHONNG_FLAGS` env var (set by the `ipyai` CLI when `-r` is passed). The `_ng_parser` (argparse) parses `-r <id>` or bare `-r` (const=-1 for interactive picker).
+Resume is triggered by `IPYTHONNG_FLAGS` env var (set by the `ipyclaude` CLI when `-r` is passed). The `_ng_parser` (argparse) parses `-r <id>` or bare `-r` (const=-1 for interactive picker).
 
 On exit, an `atexit` handler prints the session ID for easy resume.
 
@@ -233,7 +233,7 @@ history_manager.get_range(session=0, start=start, stop=stop, raw=True, output=Tr
 
 Rules:
 
-- inputs that look like `ipyai` commands (starting with `.` or `%ipyai`) are skipped
+- inputs that look like `ipyclaude` commands (starting with `.` or `%ipyclaude`) are skipped
 - string-literal-only cells (detected by `_is_note` via `ast.parse`) become `<note>` tags containing the string value
 - normal code becomes `<code>...</code>`
 - output history, when present, becomes `<output>...</output>`
@@ -284,7 +284,7 @@ Display processing (`_display_text`):
 - `compact_tool_display` rewrites lisette tool detail blocks to a short `🔧 f(x=1) => 2` form
 - these affect only the visible terminal output; SQLite keeps the original response
 
-`ipyai` wraps the streaming phase in a small guard that temporarily marks `shell.display_pub._is_publishing = True`. That keeps terminal-visible AI output out of IPython's normal stdout capture and therefore out of `output_history`, while still allowing `ipyai` to store the full response in `ai_prompts`.
+`ipyclaude` wraps the streaming phase in a small guard that temporarily marks `shell.display_pub._is_publishing = True`. That keeps terminal-visible AI output out of IPython's normal stdout capture and therefore out of `output_history`, while still allowing `ipyclaude` to store the full response in `ai_prompts`.
 
 ## Keybindings
 
@@ -311,15 +311,15 @@ Creation behavior:
 
 - these files are created on demand when first needed
 - the initial `model` defaults from `IPYAI_MODEL` if present
-- runtime `%ipyai model ...` and similar commands change only the live extension object, not the config file
+- runtime `%ipyclaude model ...` and similar commands change only the live extension object, not the config file
 
 When `log_exact` is enabled, the log file contains the exact fully-expanded prompt passed to the model and the exact raw response returned from the stream.
 
 ## Tests
 
-To run ipyai in isolation (no user config, startup, or history), set these environment variables:
+To run ipyclaude in isolation (no user config, startup, or history), set these environment variables:
 
-- `XDG_CONFIG_HOME` — redirects ipyai's config files (`config.json`, `sysp.txt`, `startup.ipynb`)
+- `XDG_CONFIG_HOME` — redirects ipyclaude's config files (`config.json`, `sysp.txt`, `startup.ipynb`)
 - `IPYTHON_DIR` — redirects IPython's profile directory (prevents loading user `ipython_config.py` and startup scripts)
 - `--HistoryManager.hist_file=<path>` — isolates the history database
 
@@ -346,7 +346,7 @@ Coverage currently focuses on:
 - session persistence: CWD in remark, list sessions, resume session
 - code block extraction
 
-When changing behavior in [ipyai/core.py](ipyai/core.py), update or add the narrowest possible test in [tests/test_core.py](tests/test_core.py).
+When changing behavior in [ipyclaude/core.py](ipyclaude/core.py), update or add the narrowest possible test in [tests/test_core.py](tests/test_core.py).
 
 ## Common Change Points
 
